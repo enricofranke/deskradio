@@ -1,0 +1,21 @@
+# Deskradio with Docker Compose:
+#   cp .env.example .env   # fill in RADIO_BOT_TOKEN and the IDs
+#   docker compose up -d
+services:
+  deskradio:
+    image: ghcr.io/enricofranke/deskradio:latest
+    # Or build it yourself from this folder:
+    # build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Paths inside the container; they override the ones from .env.
+      NODE_ENV: production
+      RADIO_STATE_FILE: /app/data/state.json
+      RADIO_CACHE_DIR: /tmp/deskradio-cache
+      HEALTH_PORT: 8080
+    volumes:
+      - deskradio-data:/app/data
+
+volumes:
+  deskradio-data:

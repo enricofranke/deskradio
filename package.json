@@ -1,0 +1,48 @@
+{
+  "name": "deskradio",
+  "version": "1.0.0",
+  "description": "A self-hosted Discord radio bot: internet radio in your voice channel, station votes and YouTube/SoundCloud requests.",
+  "license": "MIT",
+  "author": "Enrico Franke",
+  "homepage": "https://github.com/enricofranke/deskradio#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/enricofranke/deskradio.git"
+  },
+  "bugs": {
+    "url": "https://github.com/enricofranke/deskradio/issues"
+  },
+  "keywords": [
+    "discord",
+    "discord-bot",
+    "radio",
+    "music-bot",
+    "internet-radio",
+    "voice",
+    "lofi",
+    "self-hosted"
+  ],
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test test/radio.test.mjs",
+    "token": "node scripts/token.mjs"
+  },
+  "dependencies": {
+    "@discordjs/voice": "^0.19.2",
+    "discord.js": "^14.27.0",
+    "dotenv": "^16.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  }
+}
