@@ -37,6 +37,10 @@ export const env = {
   /** Heruntergeladene Wünsche; wird bei jedem Start geleert. */
   cacheDir: optional('RADIO_CACHE_DIR') ?? 'data/cache',
   ytDlp: optional('RADIO_YTDLP') ?? 'yt-dlp',
+  /** Cookie-Datei (Netscape-Format) für YouTube, wenn es die Server-IP für einen Bot hält. */
+  ytDlpCookies: optional('RADIO_YTDLP_COOKIES'),
+  /** Proxy für yt-dlp, z. B. http://user:pass@host:port oder socks5://host:port. */
+  ytDlpProxy: optional('RADIO_YTDLP_PROXY'),
   healthPort: Number(optional('HEALTH_PORT') ?? 0),
   logLevel: (optional('LOG_LEVEL') ?? 'info') as 'debug' | 'info' | 'warn' | 'error',
   isProduction: optional('NODE_ENV') === 'production',

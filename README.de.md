@@ -137,6 +137,8 @@ Alles sind Umgebungsvariablen, meist in `.env`.
 | `RADIO_STATE_FILE` | `data/state.json` | Hier stehen Sender, Lautstärke und an/aus |
 | `RADIO_CACHE_DIR` | `data/cache` | Hierhin lädt yt-dlp die Wünsche; wird bei jedem Start geleert |
 | `RADIO_YTDLP` | `yt-dlp` | Pfad zu yt-dlp |
+| `RADIO_YTDLP_COOKIES` | – | Cookie-Datei (Netscape-Format) für YouTube. Nötig, wenn YouTube „Sign in to confirm you're not a bot“ meldet, was auf Server-IPs häufig ist. Am besten mit einem eigenen Google-Konto |
+| `RADIO_YTDLP_PROXY` | – | Proxy für yt-dlp, z. B. `socks5://host:1080` |
 | `HEALTH_PORT` | `0` (Image: `8080`) | HTTP-Port für `/health`; `0` schaltet ihn ab |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn` oder `error` |
 | `NODE_ENV` | – | `production` schreibt JSON-Logs |

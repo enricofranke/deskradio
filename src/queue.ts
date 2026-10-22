@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { mkdirSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { env } from './env.js';
 import { log } from './logger.js';
@@ -80,11 +81,33 @@ export function useRunner(runner: Runner): void {
   run = runner;
 }
 
+let cookieFile: string | undefined;
+
+/**
+ * yt-dlp schreibt die Cookies nach jedem Lauf zurück. Die Vorlage kann schreibgeschützt
+ * sein (Kubernetes-Secret), deshalb arbeitet es auf einer Kopie, die beim Start entsteht.
+ */
+function cookieArgs(): string[] {
+  if (!env.ytDlpCookies) return [];
+  if (!cookieFile) {
+    cookieFile = join(tmpdir(), `deskradio-cookies-${process.pid}.txt`);
+    copyFileSync(env.ytDlpCookies, cookieFile);
+  }
+  return ['--cookies', cookieFile];
+}
+
 function runYtDlp(args: string[], timeoutMs: number): Promise<string> {
   return new Promise((done, fail) => {
     // Node als JavaScript-Laufzeit: YouTube verlangt inzwischen, dass yt-dlp
     // ein Skript ausführt, bevor es die Tonspur herausgibt.
-    const child = spawn(env.ytDlp, ['--no-playlist', '--no-warnings', '--js-runtimes', 'node', ...args],
+    let extra: string[];
+    try {
+      extra = [...cookieArgs(), ...(env.ytDlpProxy ? ['--proxy', env.ytDlpProxy] : [])];
+    } catch (error) {
+      fail(new Error(`cookie file not readable: ${(error as Error).message}`));
+      return;
+    }
+    const child = spawn(env.ytDlp, ['--no-playlist', '--no-warnings', '--js-runtimes', 'node', ...extra, ...args],
       { stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     let err = '';
