@@ -1,6 +1,6 @@
 {
   "name": "deskradio",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "A self-hosted Discord radio bot: internet radio in your voice channel, station votes and YouTube/SoundCloud requests.",
   "license": "MIT",
   "author": "Enrico Franke",

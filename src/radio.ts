@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import type { Readable } from 'node:stream';
 import {
   AudioPlayerStatus,
   NetworkingStatusCode,
@@ -39,7 +40,9 @@ import {
   addWish,
   clearPlaylist,
   clearQueue,
+  downloadState,
   finishHead,
+  followFile,
   finishPlaylistTrack,
   head,
   isPlaylistLink,
@@ -97,8 +100,8 @@ export type RadioSnapshot = {
   track: Pick<Track, 'id' | 'title' | 'duration' | 'source' | 'requesterId' | 'thumbnail' | 'url' | 'playlistId'> | null;
   /** Wünsche, die danach kommen, ohne den laufenden. */
   upcoming: Pick<Track, 'id' | 'title' | 'duration' | 'requesterId' | 'status'>[];
-  /** Die Playlist; `left` zählt die Songs, die noch kommen, ohne den laufenden. */
-  playlist: (PlaylistView & { left: number }) | null;
+  /** Die Playlist; `left` zählt die Songs, die noch kommen, ohne den laufenden. `loading`: ihr nächster Song lädt noch. */
+  playlist: (PlaylistView & { left: number; loading: boolean }) | null;
   listeners: number;
   volume: number;
   bitrateKbps: number;
@@ -116,6 +119,8 @@ let player: AudioPlayer | null = null;
 let connection: VoiceConnection | null = null;
 let ffmpeg: ChildProcess | null = null;
 let resource: AudioResource | null = null;
+/** Liest einen Song, der noch lädt, und reicht ihn an ffmpeg weiter. */
+let feed: Readable | null = null;
 let playing: string | null = null;
 let playingSince = 0;
 /** Startstelle des laufenden Wunsches in Sekunden (nach einer Unterbrechung). */
@@ -161,7 +166,11 @@ export function radioSnapshot(): RadioSnapshot {
     },
     upcoming: tracks().filter((track) => track !== current)
       .map(({ id, title, duration, requesterId, status }) => ({ id, title, duration, requesterId, status })),
-    playlist: list && { ...list, left: Math.max(0, list.total - list.position + (fromList ? 0 : 1)) },
+    playlist: list && {
+      ...list,
+      left: Math.max(0, list.total - list.position + (fromList ? 0 : 1)),
+      loading: !fromList && playlistHead()?.status === 'loading',
+    },
     listeners: channel ? listeners(channel).length : 0,
     volume: getState().volume,
     bitrateKbps: channel ? streamBitrate(channel) : RULES.minBitrateKbps,
@@ -190,9 +199,13 @@ function playingTrack(): Track | null {
  * Was jetzt laufen soll. Ein Song, der schon läuft, spielt zu Ende; einer,
  * der unterbrochen wurde, geht zuerst weiter. Sonst der erste Wunsch vor der
  * Playlist. Lädt beides noch, läuft solange das Radio.
+ *
+ * Ein Song, der noch lädt, kann nur von vorn laufen: Mittendrin weiter geht
+ * erst, wenn die Datei komplett ist.
  */
 export function nextTrack(): Track | null {
-  const ready = candidates().filter((track) => track.status === 'ready' && track.file);
+  const ready = candidates().filter((track) => track.file &&
+    (track.status === 'ready' || (track.status === 'partial' && !(track.resumeAt ?? 0))));
   return ready.find((track) => playing === `track:${track.id}`)
     ?? ready.find((track) => (track.resumeAt ?? 0) > 0)
     ?? ready[0] ?? null;
@@ -486,7 +499,7 @@ export async function requestPlaylist(interaction: ChatInputCommandInteraction |
   await interaction.deferReply(EPHEMERAL);
   const result = await addPlaylist(link, member.id, team, {
     shuffle,
-    announce: (list, count) => t('event_playlist', { user: `<@${member.id}>`, title: escapeMarkdown(list.title), count }),
+    announce: (list, count) => t(list.endless ? 'event_mix' : 'event_playlist', { user: `<@${member.id}>`, title: escapeMarkdown(list.title), count }),
   });
   if ('error' in result) {
     await interaction.editReply({ content: t(`playlist_${result.error}`, {
@@ -497,7 +510,8 @@ export async function requestPlaylist(interaction: ChatInputCommandInteraction |
   log.info('Radio: playlist started', { title: result.playlist.title, songs: result.count, shuffle, by: member.id });
   // Wünsche kommen zuerst; das sollen alle wissen, die gerade eine Playlist starten.
   const waiting = tracks().length;
-  await interaction.editReply({ content: t(waiting > 0 ? 'playlist_added_after' : 'playlist_added', {
+  const key = waiting > 0 ? 'playlist_added_after' : result.playlist.endless ? 'playlist_added_mix' : 'playlist_added';
+  await interaction.editReply({ content: t(key, {
     title: escapeMarkdown(result.playlist.title), count: result.count, wishes: waiting,
   }) });
 }
@@ -947,14 +961,24 @@ function startStream(station: Station, bitrateKbps: number): void {
  * Lautstärke oder Bitrate, oder alle waren kurz aus dem Kanal.
  */
 function startTrack(track: Track, bitrateKbps: number): void {
-  startSource(`track:${track.id}`, track.file!, track.title, bitrateKbps, track.resumeAt ?? 0);
+  // Lädt er noch, liest ffmpeg über eine Leitung, die auf den Rest der Datei wartet.
+  const input = track.status === 'partial' ? followFile(track.file!, () => downloadState(track)) : track.file!;
+  startSource(`track:${track.id}`, input, track.title, bitrateKbps, track.resumeAt ?? 0);
 }
 
-/** Radio (URL) oder Wunsch (Datei): ffmpeg starten und an den Player hängen. */
-function startSource(key: string, input: string, label: string, bitrateKbps: number, seek = 0): void {
+/** Radio (URL), Wunsch (Datei) oder ein Song, der noch lädt (Stream): ffmpeg starten und an den Player hängen. */
+function startSource(key: string, input: string | Readable, label: string, bitrateKbps: number, seek = 0): void {
   stopStream();
-  const child = spawn('ffmpeg', ffmpegArgs(input, { volume: getState().volume, bitrateKbps, seek }),
-    { stdio: ['ignore', 'pipe', 'pipe'] });
+  const piped = typeof input !== 'string';
+  const child = spawn('ffmpeg', ffmpegArgs(piped ? 'pipe:0' : input, { volume: getState().volume, bitrateKbps, seek: piped ? 0 : seek }),
+    { stdio: [piped ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
+  if (piped) {
+    feed = input;
+    // Endet ffmpeg vorher (Überspringen), bricht das Schreiben ab; das ist kein Fehler.
+    child.stdin?.on('error', () => {});
+    input.on('error', (error) => log.warn('Radio: could not read the download', { source: key, error: String(error) }));
+    input.pipe(child.stdin!);
+  }
   let stderr = '';
   child.stderr?.on('data', (chunk: Buffer) => {
     stderr = (stderr + chunk.toString()).slice(-500);
@@ -995,6 +1019,8 @@ function stopStream(): void {
   const wasPlaying = playing !== null;
   playing = null;
   resource = null;
+  feed?.destroy();
+  feed = null;
   if (ffmpeg && ffmpeg.exitCode === null) ffmpeg.kill();
   ffmpeg = null;
   player?.stop(true);

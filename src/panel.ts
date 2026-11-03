@@ -92,7 +92,8 @@ export function renderPanel(s: RadioSnapshot, song: string | null, recent: strin
     if (s.track.url.startsWith('https://')) embed.setURL(s.track.url);
     const vars = { user: `<@${s.track.requesterId}>`, duration: formatDuration(s.track.duration), source: s.track.source };
     lines.push(list
-      ? t('panel_playlist_meta', { ...vars, playlist: escapeMarkdown(clip(list.title, 80)), position: list.position, total: list.total })
+      ? t(list.endless ? 'panel_mix_meta' : 'panel_playlist_meta',
+        { ...vars, playlist: escapeMarkdown(clip(list.title, 80)), position: list.position, total: list.total })
       : t('panel_track_meta', vars));
   } else {
     embed.setAuthor({ name: PANEL_TITLE }).setTitle(clip(`📻 ${s.station.name}`, 256));
@@ -109,12 +110,13 @@ export function renderPanel(s: RadioSnapshot, song: string | null, recent: strin
     }));
     if (s.upcoming.length > SHOWN_UPCOMING) items.push(t('panel_next_more', { count: s.upcoming.length - SHOWN_UPCOMING }));
     // Nach den Wünschen geht die Playlist weiter, erst danach kommt das Radio.
-    if (s.playlist && s.playlist.left > 0) {
-      items.push(t('panel_next_playlist', {
+    if (s.playlist && (s.playlist.left > 0 || s.playlist.endless)) {
+      items.push(t(s.playlist.endless ? 'panel_next_mix' : 'panel_next_playlist', {
         title: escapeMarkdown(clip(s.playlist.title, 80)), count: s.playlist.left, user: `<@${s.playlist.requesterId}>`,
-      }));
+      }) + (s.playlist.loading ? t('panel_loading') : ''));
     }
-    items.push(t('panel_after', { station: s.station.name }));
+    // Ein Mix endet nicht von allein; das Radio kommt erst nach dem Überspringen.
+    items.push(t(s.playlist?.endless ? 'panel_after_mix' : 'panel_after', { station: s.station.name }));
     fields.push({ name: t('panel_next'), value: items.join('\n') });
   }
   if (s.vote) {

@@ -1,7 +1,10 @@
 import { spawn } from 'node:child_process';
-import { copyFileSync, mkdirSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdirSync, rmSync, statSync } from 'node:fs';
+import { open, type FileHandle } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { Readable } from 'node:stream';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { env } from './env.js';
 import { log } from './logger.js';
 import { RULES } from './settings.js';
@@ -15,7 +18,12 @@ import { t } from './texts.js';
  *
  * Daneben höchstens eine Playlist: Sie spielt, wenn keine Wünsche anstehen,
  * und erst wenn sie durch ist, kommt wieder das Radio. Geladen werden nur der
- * laufende Song und der nächste, nicht die ganze Liste auf einmal.
+ * laufende Song und der nächste, nicht die ganze Liste auf einmal. Ein
+ * YouTube-Mix („Radio“, list=RD…) hat kein Ende: Bevor er ausgeht, kommt ein
+ * neuer Mix ab dem letzten Song dazu.
+ *
+ * Ein YouTube-Song (WebM) kann schon laufen, während er noch lädt: Über den
+ * Proxy dauert der Download länger als das Abrufen, aber viel kürzer als der Song.
  */
 
 export type Track = {
@@ -29,7 +37,8 @@ export type Track = {
   /** Vorschaubild von YouTube oder SoundCloud fürs Panel. */
   thumbnail: string | null;
   file: string | null;
-  status: 'loading' | 'ready';
+  /** `partial`: Die Datei wächst noch, abspielbar von vorn. */
+  status: 'loading' | 'partial' | 'ready';
   /** Sekunden, an denen es nach einer Unterbrechung weitergeht. */
   resumeAt?: number;
   /** Gesetzt, wenn der Song aus einer Playlist kommt. */
@@ -53,6 +62,8 @@ export type PlaylistView = {
   /** Stelle des aktuellen Songs, ab 1. */
   position: number;
   total: number;
+  /** YouTube-Mix: läuft, bis jemand ihn überspringt. */
+  endless: boolean;
 };
 export type PlaylistError = 'link' | 'running' | 'empty' | 'failed';
 export type PlaylistResult = { playlist: PlaylistView; count: number } | { error: PlaylistError; detail?: string };
@@ -67,6 +78,10 @@ type Playlist = Omit<PlaylistView, 'position'> & {
   nextEntry: number;
   /** Downloads, die nacheinander gescheitert sind. */
   failures: number;
+  /** Schon in der Liste, damit ein nachgeladener Mix nichts doppelt bringt. */
+  seen: Set<string>;
+  extending: boolean;
+  extendFailures: number;
 };
 
 const HOSTS = new Set([
@@ -102,8 +117,16 @@ export function supportedLink(input: string, hosts: ReadonlySet<string> = HOSTS)
 export function isPlaylistLink(url: URL): boolean {
   const host = url.hostname.toLowerCase();
   if (host.endsWith('soundcloud.com')) return /^\/[^/]+\/sets\/[^/]+/.test(url.pathname);
+  // „Radio starten“ auf YouTube: gemeint ist der Mix, nicht nur der erste Song.
+  if (url.searchParams.has('list') && url.searchParams.get('start_radio') === '1') return true;
   if (host === 'youtu.be') return false;
   return url.searchParams.has('list') && !url.searchParams.has('v');
+}
+
+/** YouTube-Mix („Radio“): Die Liste beginnt mit RD und hat kein festes Ende. */
+export function isMixLink(url: URL): boolean {
+  const host = url.hostname.toLowerCase();
+  return !host.endsWith('soundcloud.com') && (url.searchParams.get('list') ?? '').startsWith('RD');
 }
 
 /** radio.ts hört zu; `event` landet als letzte Änderung im Panel. */
@@ -126,8 +149,8 @@ export function head(): Track | undefined {
 /** Die laufende Playlist, oder null. */
 export function playlist(): PlaylistView | null {
   if (!list) return null;
-  const { id, title, url, requesterId, total } = list;
-  return { id, title, url, requesterId, total, position: (list.buffer[0]?.entryIndex ?? list.nextEntry) + 1 };
+  const { id, title, url, requesterId, total, endless } = list;
+  return { id, title, url, requesterId, total, endless, position: (list.buffer[0]?.entryIndex ?? list.nextEntry) + 1 };
 }
 
 /** Der Song der Playlist, der als Nächstes dran ist oder gerade läuft. */
@@ -315,14 +338,16 @@ export async function addPlaylist(link: string, requesterId: string, team: boole
   if (!url) return { error: 'link' };
   if (list && !team) return { error: 'running' };
 
+  // Einen Mix nur anlesen: YouTube gibt ihn in kleinen Stücken heraus, 500 Einträge dauern über eine halbe Minute.
+  const mix = isMixLink(url);
   let info: PlaylistInfo;
   try {
-    info = await probePlaylist(url.href);
+    info = await probePlaylist(url.href, mix ? RULES.mixBatch : RULES.playlistMax);
   } catch (error) {
     if (error instanceof NotAPlaylist) return { error: 'link' };
     return { error: 'failed', detail: error instanceof Error ? error.message : String(error) };
   }
-  let entries = team ? info.entries : info.entries.filter((entry) => entry.duration <= RULES.maxTrackMinutes * 60);
+  let entries = allowed(unique(info.entries), team);
   // Ein Video aus der Playlist im Link: dort anfangen.
   const start = entries.findIndex((entry) => entry.id !== null && entry.id === url.searchParams.get('v'));
   if (start > 0) entries = entries.slice(start);
@@ -335,12 +360,61 @@ export async function addPlaylist(link: string, requesterId: string, team: boole
   list = {
     id: `p${nextId++}`, title: info.title, url: info.url, source: info.source, requesterId, team,
     entries, total: entries.length, buffer: [], nextEntry: 0, failures: 0,
+    endless: mix, seen: new Set(info.entries.map(entryKey)), extending: false, extendFailures: 0,
   };
   fillBuffer(list);
   const view = playlist()!;
   changed(options.announce?.(view, entries.length));
   void pump();
   return { playlist: view, count: entries.length };
+}
+
+function entryKey(entry: PlaylistEntry): string {
+  return entry.id ?? entry.url;
+}
+
+/** Ein Mix wiederholt Songs; jeder Song nur einmal. */
+export function unique(entries: readonly PlaylistEntry[]): PlaylistEntry[] {
+  const seen = new Set<string>();
+  return entries.filter((entry) => !seen.has(entryKey(entry)) && Boolean(seen.add(entryKey(entry))));
+}
+
+/** Ohne Team-Rechte gilt die Längengrenze der Wünsche, soweit die Länge schon bekannt ist. */
+function allowed(entries: PlaylistEntry[], team: boolean): PlaylistEntry[] {
+  return team ? entries : entries.filter((entry) => entry.duration <= RULES.maxTrackMinutes * 60);
+}
+
+/**
+ * Den Mix verlängern: ein neuer Mix ab dem letzten Song, ohne Songs, die schon
+ * dran waren. Kommt nichts Neues oder scheitert es dreimal, endet er normal.
+ */
+async function extendMix(p: Playlist): Promise<void> {
+  const seed = p.entries.at(-1)?.id;
+  if (p.extending || !p.endless) return;
+  if (!seed) {
+    p.endless = false;
+    return;
+  }
+  p.extending = true;
+  try {
+    const info = await probePlaylist(`https://www.youtube.com/watch?v=${seed}&list=RD${seed}`, RULES.mixBatch);
+    if (list !== p) return;
+    const fresh = allowed(unique(info.entries).filter((entry) => !p.seen.has(entryKey(entry))), p.team);
+    for (const entry of info.entries) p.seen.add(entryKey(entry));
+    p.entries.push(...fresh);
+    p.total = p.entries.length;
+    p.extendFailures = 0;
+    if (fresh.length === 0) p.endless = false;
+    log.info('Queue: mix extended', { title: p.title, added: fresh.length, total: p.total });
+    fillBuffer(p);
+    changed();
+    void pump();
+  } catch (error) {
+    log.warn('Queue: could not extend the mix', { title: p.title, error: String(error) });
+    if (++p.extendFailures >= 3) p.endless = false;
+  } finally {
+    p.extending = false;
+  }
 }
 
 /** Fisher-Yates, damit jede Reihenfolge gleich wahrscheinlich ist. */
@@ -353,7 +427,7 @@ export function shuffled<T>(items: readonly T[], random = Math.random): T[] {
   return copy;
 }
 
-/** Aktueller Song plus einer im Voraus, damit es ohne Pause weitergeht. */
+/** Aktueller Song plus einer im Voraus, damit es ohne Pause weitergeht. Ein Mix lädt rechtzeitig nach. */
 function fillBuffer(p: Playlist): void {
   while (p.buffer.length < 2 && p.nextEntry < p.entries.length) {
     const entry = p.entries[p.nextEntry];
@@ -364,6 +438,7 @@ function fillBuffer(p: Playlist): void {
     });
     p.nextEntry++;
   }
+  if (p.endless && p.entries.length - p.nextEntry <= RULES.mixRefill) void extendMix(p);
 }
 
 /**
@@ -434,12 +509,63 @@ export function parseDownload(out: string): Download | null {
   }
 }
 
+/** Ab wann ein wachsender Download abgespielt wird, und wie oft nachgesehen wird. Für Tests veränderbar. */
+export const PARTIAL = { bytes: 256 * 1024, pollMs: 500 };
+
+/**
+ * Wie es um den Download eines Titels steht, für den Leser, der die wachsende
+ * Datei abspielt: `gone` heißt gescheitert oder verworfen.
+ */
+export function downloadState(track: Track): 'growing' | 'done' | 'gone' {
+  if (!stillWanted(track)) return 'gone';
+  return track.status === 'ready' ? 'done' : 'growing';
+}
+
+/**
+ * Liest eine Datei, die noch geschrieben wird: Am Ende wartet er auf mehr,
+ * bis `state` meldet, dass der Download fertig (oder weg) ist.
+ */
+export function followFile(path: string, state: () => 'growing' | 'done' | 'gone', pollMs = 200): Readable {
+  let handle: FileHandle | null = null;
+  let position = 0;
+  return new Readable({
+    async read(size) {
+      try {
+        handle ??= await open(path, 'r');
+        while (!this.destroyed) {
+          // Erst fragen, dann lesen: Ist der Download vorher fertig und kommt nichts mehr, ist es das Ende.
+          const finished = state() !== 'growing';
+          const buffer = Buffer.alloc(Math.max(size, 64 * 1024));
+          const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+          if (bytesRead > 0) {
+            position += bytesRead;
+            this.push(buffer.subarray(0, bytesRead));
+            return;
+          }
+          if (finished) {
+            this.push(null);
+            return;
+          }
+          await sleep(pollMs);
+        }
+      } catch (error) {
+        this.destroy(error as Error);
+      }
+    },
+    destroy(error, callback) {
+      const closing = handle?.close() ?? Promise.resolve();
+      handle = null;
+      closing.catch(() => {}).finally(() => callback(error));
+    },
+  });
+}
+
 /** Erst die Wünsche, dann die Playlist. */
 function nextToLoad(): Track | undefined {
   return queue.find((track) => track.status === 'loading') ?? list?.buffer.find((track) => track.status === 'loading');
 }
 
-function stillWanted(track: Track): boolean {
+export function stillWanted(track: Track): boolean {
   return queue.includes(track) || Boolean(list?.buffer.includes(track));
 }
 
@@ -459,9 +585,27 @@ async function pump(): Promise<void> {
         const timeoutMs = 180_000 + (next.duration || 1800) * 200;
         // Playlist-Songs sind nicht einzeln geprüft: keine Livestreams, ohne Team nichts zu Langes.
         const filter = owner ? ['--match-filter', owner.team ? '!is_live' : `!is_live & duration <=? ${RULES.maxTrackMinutes * 60}`] : [];
-        const out = await run(['--no-playlist', ...filter, '-f', 'bestaudio/best', '--no-progress', '--quiet',
-          '-o', join(cacheDir(), `${next.id}.%(ext)s`),
-          '--print', 'after_move:%(.{filepath,title,duration,thumbnail})j', '--', next.url], timeoutMs);
+        // Ohne .part-Datei: Sobald genug WebM da ist, kann der Song schon laufen.
+        const growing = join(cacheDir(), `${next.id}.webm`);
+        const watch = setInterval(() => {
+          if (next.status !== 'loading' || !stillWanted(next)) return;
+          try {
+            if (statSync(growing).size < PARTIAL.bytes) return;
+          } catch {
+            return;
+          }
+          next.file = growing;
+          next.status = 'partial';
+          changed();
+        }, PARTIAL.pollMs);
+        let out: string;
+        try {
+          out = await run(['--no-playlist', ...filter, '-f', 'bestaudio/best', '--no-progress', '--quiet', '--no-part',
+            '-o', join(cacheDir(), `${next.id}.%(ext)s`),
+            '--print', 'after_move:%(.{filepath,title,duration,thumbnail})j', '--', next.url], timeoutMs);
+        } finally {
+          clearInterval(watch);
+        }
         const download = parseDownload(out);
         // Kein Pfad heißt: vom Filter ausgelassen.
         if (!download) throw new Error(owner ? 'skipped by filter (live or too long)' : 'no file');

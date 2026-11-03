@@ -24,7 +24,7 @@ It was built for a coworking channel, where people sit together for hours and wa
 - **Live panel in the voice channel chat.** It shows the station, the current song with album cover, listeners, the queue and the last change. Pick a station from a dropdown, no command needed.
 - **Fair votes.** More yes than no wins, and people who don't vote don't block. The team switches instantly.
 - **Song requests** from YouTube and SoundCloud, with a queue, limits and vote-skip. You can turn them off.
-- **Playlists** from YouTube and SoundCloud: play a whole playlist, skip single songs or the entire playlist, then the radio comes back.
+- **Playlists and YouTube mixes** from YouTube and SoundCloud: play a whole playlist or an endless mix, skip single songs or the entire playlist, then the radio comes back.
 - **Only plays when someone listens.** It reconnects by itself and backs off when a stream is down.
 - **Crisp sound.** It follows the channel bitrate, up to 384 kbit/s on boosted servers.
 - **Channel status.** The current song shows up under the channel name.
@@ -124,7 +124,9 @@ Skip votes (for a song or a whole playlist) work the same way with 30 seconds. A
 ## Playlists
 
 - Paste a playlist link (`youtube.com/playlist?list=…`, a SoundCloud set) into **📃 Playlist** in the panel, `/radio playlist` or the request form. A link to a video inside a playlist (`watch?v=…&list=…`) starts the playlist at that video when used with `/radio playlist`; in the request form it stays a single song.
+- **YouTube mixes** ("Start radio", `watch?v=…&list=RD…&start_radio=1`) work too, also in the request form. A mix never runs out: before it ends, the bot fetches a new mix from its last song, without repeats. It plays until someone skips it.
 - Requests come first: they play between playlist songs, never in the middle of one. When the playlist is done, the radio comes back.
+- YouTube songs start while they are still downloading, so the first song usually plays 20–30 seconds after the link, depending on the proxy.
 - Only the current and the next song are downloaded, not the whole list. Private, deleted and live videos are left out.
 - **⏭️ Skip** skips the current playlist song, **⏹️ Skip playlist** the whole playlist. The team and whoever started the playlist skip instantly, everyone else by vote.
 - One playlist at a time, up to 500 songs. Only the team can replace a running one. Without team rights, songs over 10 minutes are left out.

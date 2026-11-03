@@ -52,6 +52,9 @@ export const RULES = {
   /** Playlists: höchstens so viele Songs, und nach so vielen Fehlversuchen am Stück ist Schluss. */
   playlistMax: 500,
   playlistMaxFailures: 5,
+  /** YouTube-Mix: so viele Songs auf einmal, und nachladen, wenn nur noch so viele übrig sind. */
+  mixBatch: 50,
+  mixRefill: 5,
   skipVoteSeconds: 30,
   /** Pause nach einer Abstimmung zum Überspringen (Song oder Playlist). */
   skipCooldownSeconds: 30,

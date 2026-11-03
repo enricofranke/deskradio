@@ -24,7 +24,7 @@ Entstanden ist er für einen Coworking-Kanal, in dem Leute stundenlang zusammens
 - **Live-Panel im Chat des Sprachkanals.** Es zeigt Sender, laufenden Song mit Album-Cover, Zuhörende, Warteschlange und die letzte Änderung. Sender wählt man im Dropdown, ganz ohne Befehl.
 - **Faire Abstimmungen.** Mehr Ja als Nein gewinnt, wer nichts drückt, blockiert nicht. Das Team wechselt sofort.
 - **Wünsche** von YouTube und SoundCloud, mit Warteschlange, Grenzen und Überspringen per Abstimmung. Lassen sich abschalten.
-- **Playlists** von YouTube und SoundCloud: eine ganze Playlist abspielen, einzelne Songs oder die ganze Playlist überspringen, danach kommt wieder das Radio.
+- **Playlists und YouTube-Mixe** von YouTube und SoundCloud: eine ganze Playlist oder einen endlosen Mix abspielen, einzelne Songs oder die ganze Playlist überspringen, danach kommt wieder das Radio.
 - **Spielt nur, wenn jemand zuhört.** Verbindet sich selbst neu und wartet länger, wenn ein Stream ausfällt.
 - **Guter Klang.** Übernimmt die Bitrate des Kanals, auf geboosteten Servern bis 384 kbit/s.
 - **Kanalstatus.** Der laufende Song steht unter dem Kanalnamen.
@@ -124,7 +124,9 @@ Alles geht auch über das Panel. Discord-Clients auf Englisch zeigen die englisc
 ## Playlists
 
 - Den Playlist-Link (`youtube.com/playlist?list=…`, ein SoundCloud-Set) in **📃 Playlist** im Panel, in `/radio playlist` oder ins Wunsch-Formular einfügen. Ein Link zu einem Video in einer Playlist (`watch?v=…&list=…`) startet mit `/radio playlist` die Playlist bei diesem Video; im Wunsch-Formular bleibt er ein einzelner Song.
+- **YouTube-Mixe** („Radio starten“, `watch?v=…&list=RD…&start_radio=1`) gehen auch, sogar im Wunsch-Formular. Ein Mix geht nie aus: Bevor er endet, holt der Bot einen neuen Mix ab dem letzten Song, ohne Wiederholungen. Er läuft, bis ihn jemand überspringt.
 - Wünsche gehen vor: Sie laufen zwischen zwei Playlist-Songs, nie mitten in einem. Ist die Playlist durch, kommt wieder das Radio.
+- YouTube-Songs laufen schon, während sie noch laden; der erste Song spielt meist 20–30 Sekunden nach dem Link, je nach Proxy.
 - Geladen werden nur der laufende und der nächste Song, nicht die ganze Liste. Private, gelöschte und Live-Videos fallen raus.
 - **⏭️ Überspringen** überspringt den laufenden Playlist-Song, **⏹️ Playlist überspringen** die ganze Playlist. Team und wer die Playlist gestartet hat sofort, alle anderen per Abstimmung.
 - Eine Playlist zur Zeit, höchstens 500 Songs. Eine laufende ersetzen kann nur das Team. Ohne Team-Rechte fallen Songs über 10 Minuten raus.

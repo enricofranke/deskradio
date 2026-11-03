@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { mock, test } from 'node:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -34,6 +34,8 @@ const catalog = new Map([
   ['https://www.youtube.com/watch?v=fuenf', { title: 'Fünfter Song', duration: 210, extractor_key: 'Youtube' }],
   ['https://api.soundcloud.com/tracks/77', { title: 'Langer API-Song', duration: 900, extractor_key: 'Soundcloud' }],
   ['https://soundcloud.com/ncs/vier', { title: 'Vierter SC-Song', duration: 240, extractor_key: 'Soundcloud' }],
+  ['https://www.youtube.com/watch?v=s1', { title: 'Mix-Song 1', duration: 200, extractor_key: 'Youtube' }],
+  ['https://www.youtube.com/watch?v=s2', { title: 'Mix-Song 2', duration: 210, extractor_key: 'Youtube' }],
 ]);
 // Playlists, wie yt-dlp sie mit --flat-playlist liefert: SoundCloud ohne Titel und Länge.
 const yt = (id, title, duration) => ({ _type: 'url', ie_key: 'Youtube', id, url: `https://www.youtube.com/watch?v=${id}`, title, duration });
@@ -48,13 +50,23 @@ const playlists = new Map([
   ] }],
   ['PLkaputt', { title: 'Kaputt', extractor_key: 'YoutubeTab', webpage_url: 'https://www.youtube.com/playlist?list=PLkaputt',
     entries: [1, 2, 3, 4, 5, 6].map((n) => yt(`k${n}`, `K${n}`, 100)) }],
+  // YouTube-Mix: wiederholt Songs; der Nachfolger-Mix ab dem letzten Song bringt ein paar neue.
+  ['RDseed', { title: 'Mix - Seed', extractor_key: 'YoutubeTab', webpage_url: 'https://www.youtube.com/watch?v=s1&list=RDseed',
+    entries: ['s1', 's2', 's3', 's2', 's4', 's5', 's6', 's7'].map((id) => yt(id, `Song ${id}`, 200)) }],
+  ['RDs7', { title: 'Mix - Song s7', extractor_key: 'YoutubeTab', webpage_url: 'https://www.youtube.com/watch?v=s7&list=RDs7',
+    entries: ['s7', 's6', 'n1', 'n2', 'n3'].map((id) => yt(id, `Song ${id}`, 200)) }],
 ]);
+/** Jede Abfrage eines Inhaltsverzeichnisses. */
+const probes = [];
+/** Downloads, die erst halb geschrieben sind, bis ihr Promise sich erfüllt. */
+const slow = new Map();
 const failDownload = new Set();
 /** Jeder Download mit seinen Argumenten, für die Playlist-Tests. */
 const downloads = [];
 queue.useRunner(async (args) => {
   const url = args.at(-1);
   if (args.includes('--flat-playlist')) {
+    probes.push(url);
     const list = playlists.get(new URL(url).searchParams.get('list') ?? url);
     if (list) return JSON.stringify({ _type: 'playlist', ...list });
     const info = catalog.get(url);
@@ -74,7 +86,11 @@ queue.useRunner(async (args) => {
   const filter = args.includes('--match-filter') ? args[args.indexOf('--match-filter') + 1] : '';
   if (info.duration > Number(/duration <=\? (\d+)/.exec(filter)?.[1] ?? Infinity)) return '';
   const file = args[args.indexOf('-o') + 1].replace('%(ext)s', 'webm');
-  writeFileSync(file, 'ton');
+  if (slow.has(url)) {
+    writeFileSync(file, 'teil');
+    await slow.get(url);
+    appendFileSync(file, '-rest');
+  } else writeFileSync(file, 'ton');
   return `${JSON.stringify({ filepath: file, title: info.title, duration: info.duration })}\n`;
 });
 /** Warten, bis die Attrappe alle Downloads „fertig“ hat. */
@@ -700,6 +716,14 @@ test('Playlist-Links erkennen, Einträge lesen, mischen', () => {
   assert.equal(is('https://youtu.be/abc?list=PL123'), false);
   assert.equal(is('https://soundcloud.com/ncs/song'), false);
   assert.equal(is('https://www.youtube.com/watch?v=abc'), false);
+  assert.equal(is('https://www.youtube.com/watch?v=9D-QD_HIfjA&list=RD9D-QD_HIfjA&start_radio=1'), true, '„Radio starten“ meint den Mix');
+  assert.equal(is('https://www.youtube.com/watch?v=abc&list=RDabc&index=3'), false, 'ein Song aus einem laufenden Mix');
+  const mix = (link) => queue.isMixLink(new URL(link));
+  assert.equal(mix('https://www.youtube.com/watch?v=abc&list=RDabc&start_radio=1'), true);
+  assert.equal(mix('https://music.youtube.com/watch?v=abc&list=RDAMVMabc'), true);
+  assert.equal(mix('https://www.youtube.com/playlist?list=PL123'), false);
+  assert.deepEqual(queue.unique([{ id: 'a', url: 'x' }, { id: 'b', url: 'y' }, { id: 'a', url: 'x' }, { id: null, url: 'z' }, { id: null, url: 'z' }])
+    .map((entry) => entry.id ?? entry.url), ['a', 'b', 'z'], 'jeder Song nur einmal');
 
   assert.deepEqual(queue.playlistEntry({ ie_key: 'Youtube', id: 'abc', url: 'https://www.youtube.com/watch?v=abc', title: 'Song', duration: 201.6 }),
     { id: 'abc', url: 'https://www.youtube.com/watch?v=abc', title: 'Song', duration: 202, thumbnail: 'https://i.ytimg.com/vi/abc/hqdefault.jpg' });
@@ -845,6 +869,105 @@ test('Playlist: SoundCloud nennt Titel erst beim Download, zu Langes und Kaputte
   assert.equal(downloads.length, before);
   assert(text(await panelNow()).includes(t('event_playlist_broken', { title: 'Kaputt' })));
   empty();
+});
+
+test('YouTube-Mix: per „Radio starten“-Link, ohne Doppelte, lädt endlos nach', async () => {
+  const m = member();
+  enter(m);
+  const before = probes.length;
+  const start = deferred(m);
+  await radio.requestWish(start, 'https://www.youtube.com/watch?v=s1&list=RDseed&start_radio=1');
+  assert.equal(lastReply(start), t('playlist_added_mix', { title: 'Mix - Seed' }));
+  assert.equal(queue.playlist().endless, true);
+  await settle();
+  // Sieben verschiedene Songs, fünf davon noch nicht im Puffer: Der Mix lädt sofort nach, ab dem letzten Song.
+  assert.deepEqual(probes.slice(before), ['https://www.youtube.com/watch?v=s1&list=RDseed&start_radio=1',
+    'https://www.youtube.com/watch?v=s7&list=RDs7']);
+  assert.equal(queue.playlist().total, 10, 's7 und s6 kamen schon vor, n1–n3 sind neu');
+  assert.equal(queue.playlistHead().title, 'Mix-Song 1');
+
+  radio.pretendPlaying(queue.playlistHead().id);
+  const message = await panelNow();
+  assert(text(message).includes(`📻 Mix - Seed · Song 1 · 3:20 · von <@${m.id}>`));
+  assert(text(message).includes(`📻 Mix **Mix - Seed** · endlos · von <@${m.id}>`));
+  assert(text(message).includes(t('panel_after_mix', { station: radio.stationByKey(station()).name })));
+  assert(text(message).includes(t('event_mix', { user: `<@${m.id}>`, title: 'Mix - Seed' })));
+  radio.pretendPlaying(null);
+  queue.clearPlaylist();
+  empty();
+});
+
+test('Panel: lädt der erste Song der Playlist noch, steht es dabei', () => {
+  const snapshot = {
+    enabled: true, station: radio.stationByKey('lofi'), playing: true, listeners: 2, volume: 10, bitrateKbps: 384,
+    vote: null, lastEvent: null, track: null, upcoming: [],
+    playlist: { id: 'p1', title: 'Focus', url: 'https://www.youtube.com/playlist?list=x', requesterId: '7', position: 1, total: 20,
+      endless: false, left: 20, loading: true },
+  };
+  const loading = text(panel.renderPanel(snapshot, null, []));
+  assert(loading.includes(`📃 Playlist **Focus** · 20 übrig · von <@7>${t('panel_loading')}`));
+  assert(loading.includes(t('panel_after', { station: 'Lofi' })));
+  const loaded = text(panel.renderPanel({ ...snapshot, playlist: { ...snapshot.playlist, loading: false } }, null, []));
+  assert(!loaded.includes(t('panel_loading')));
+});
+
+test('ein Song, der noch lädt, wird gelesen, bis der Download fertig ist', async () => {
+  const file = join(dir, 'wachsend.webm');
+  writeFileSync(file, 'anfang-');
+  let state = 'growing';
+  const reader = queue.followFile(file, () => state, 5);
+  const chunks = [];
+  const finished = new Promise((resolve, reject) => {
+    reader.on('data', (chunk) => chunks.push(chunk));
+    reader.on('end', resolve);
+    reader.on('error', reject);
+  });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  appendFileSync(file, 'mitte-');
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  appendFileSync(file, 'ende');
+  state = 'done';
+  await finished;
+  assert.equal(Buffer.concat(chunks).toString(), 'anfang-mitte-ende', 'nichts verloren, auch nicht das letzte Stück');
+
+  // Gescheitert oder übersprungen: liest, was da ist, und hört auf.
+  writeFileSync(file, 'halb');
+  let rest = '';
+  for await (const chunk of queue.followFile(file, () => 'gone', 5)) rest += chunk;
+  assert.equal(rest, 'halb');
+});
+
+test('ein YouTube-Song läuft schon, während er noch lädt, mittendrin weiter erst, wenn er ganz da ist', async () => {
+  const admin = member({ staff: true });
+  Object.assign(queue.PARTIAL, { pollMs: 5, bytes: 4 });
+  let release;
+  slow.set('https://www.youtube.com/watch?v=vier', new Promise((resolve) => { release = resolve; }));
+  try {
+    await radio.requestWish(deferred(admin), 'https://www.youtube.com/watch?v=vier');
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    const track = queue.head();
+    assert.equal(track.status, 'partial');
+    assert.match(track.file, /\.webm$/);
+    assert.equal(queue.downloadState(track), 'growing');
+    assert.equal(radio.nextTrack(), track, 'von vorn kann er schon laufen');
+    track.resumeAt = 30;
+    assert.equal(radio.nextTrack(), null, 'an Sekunde 30 geht es erst weiter, wenn die Datei komplett ist');
+    track.resumeAt = undefined;
+    release();
+    await settle();
+    assert.equal(track.status, 'ready');
+    assert.equal(queue.downloadState(track), 'done');
+    assert.equal(readFileSync(track.file, 'utf8'), 'teil-rest');
+    assert(downloads.at(-1).args.includes('--no-part'), 'ohne .part-Datei, sonst gäbe es nichts zu lesen');
+    queue.clearQueue();
+    assert.equal(queue.downloadState(track), 'gone');
+  } finally {
+    // Auch nach einem Fehler den Download beenden, sonst wartet der Test ewig.
+    release?.();
+    slow.clear();
+    Object.assign(queue.PARTIAL, { pollMs: 500, bytes: 256 * 1024 });
+    queue.clearQueue();
+  }
 });
 
 test('abgelehnt, sobald die Mehrheit unerreichbar ist, danach Pause', async () => {
