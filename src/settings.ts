@@ -49,8 +49,11 @@ export const RULES = {
   maxTrackMinutes: 10,
   wishesPerPerson: 2,
   queueMax: 20,
+  /** Playlists: höchstens so viele Songs, und nach so vielen Fehlversuchen am Stück ist Schluss. */
+  playlistMax: 500,
+  playlistMaxFailures: 5,
   skipVoteSeconds: 30,
-  /** Pause nach einer Abstimmung zum Überspringen. */
+  /** Pause nach einer Abstimmung zum Überspringen (Song oder Playlist). */
   skipCooldownSeconds: 30,
 };
 

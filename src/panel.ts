@@ -86,11 +86,14 @@ export function renderPanel(s: RadioSnapshot, song: string | null, recent: strin
   if (!on || !s.station) {
     embed.setAuthor({ name: PANEL_TITLE }).setTitle(t('panel_off'));
   } else if (s.track) {
-    embed.setAuthor({ name: t('panel_author_wish', { name: env.name }) }).setTitle(clip(`▶️ ${s.track.title}`, 256));
+    const list = s.track.playlistId && s.playlist?.id === s.track.playlistId ? s.playlist : null;
+    embed.setAuthor({ name: t(list ? 'panel_author_playlist' : 'panel_author_wish', { name: env.name }) })
+      .setTitle(clip(`▶️ ${s.track.title}`, 256));
     if (s.track.url.startsWith('https://')) embed.setURL(s.track.url);
-    lines.push(t('panel_track_meta', {
-      user: `<@${s.track.requesterId}>`, duration: formatDuration(s.track.duration), source: s.track.source,
-    }));
+    const vars = { user: `<@${s.track.requesterId}>`, duration: formatDuration(s.track.duration), source: s.track.source };
+    lines.push(list
+      ? t('panel_playlist_meta', { ...vars, playlist: escapeMarkdown(clip(list.title, 80)), position: list.position, total: list.total })
+      : t('panel_track_meta', vars));
   } else {
     embed.setAuthor({ name: PANEL_TITLE }).setTitle(clip(`📻 ${s.station.name}`, 256));
     lines.push(s.playing ? (song ? `🎵 ${escapeMarkdown(song)}` : t('panel_playing')) : t('panel_idle'));
@@ -99,18 +102,25 @@ export function renderPanel(s: RadioSnapshot, song: string | null, recent: strin
   if (s.lastEvent) lines.push(`-# ${s.lastEvent.text} · <t:${Math.floor(s.lastEvent.at / 1000)}:R>`);
 
   const fields: { name: string; value: string }[] = [];
-  if (on && s.station && (s.track || s.upcoming.length > 0)) {
+  if (on && s.station && (s.track || s.upcoming.length > 0 || s.playlist)) {
     const items = s.upcoming.slice(0, SHOWN_UPCOMING).map((track, index) => t('panel_next_item', {
       position: index + 1, title: escapeMarkdown(clip(track.title, 80)), duration: formatDuration(track.duration),
       user: `<@${track.requesterId}>`, loading: track.status === 'loading' ? t('panel_loading') : '',
     }));
     if (s.upcoming.length > SHOWN_UPCOMING) items.push(t('panel_next_more', { count: s.upcoming.length - SHOWN_UPCOMING }));
+    // Nach den Wünschen geht die Playlist weiter, erst danach kommt das Radio.
+    if (s.playlist && s.playlist.left > 0) {
+      items.push(t('panel_next_playlist', {
+        title: escapeMarkdown(clip(s.playlist.title, 80)), count: s.playlist.left, user: `<@${s.playlist.requesterId}>`,
+      }));
+    }
     items.push(t('panel_after', { station: s.station.name }));
     fields.push({ name: t('panel_next'), value: items.join('\n') });
   }
   if (s.vote) {
+    const key = s.vote.kind === 'skip' ? 'panel_vote_skip' : s.vote.kind === 'playlist' ? 'panel_vote_playlist' : 'panel_vote_station';
     fields.push({
-      name: clip(t(s.vote.kind === 'skip' ? 'panel_vote_skip' : 'panel_vote_station', { title: s.vote.label, station: s.vote.label }), 256),
+      name: clip(t(key, { title: s.vote.label, station: s.vote.label }), 256),
       value: t('panel_vote_value', { starter: `<@${s.vote.starterId}>`, end: `<t:${Math.ceil(s.vote.endsAt / 1000)}:R>` }),
     });
   }
@@ -138,11 +148,19 @@ export function renderPanel(s: RadioSnapshot, song: string | null, recent: strin
     })));
   const actions = new ActionRowBuilder<ButtonBuilder>();
   if (env.wishes) {
-    actions.addComponents(new ButtonBuilder().setCustomId('radio:wish').setLabel(t('panel_wish')).setEmoji('🎵')
-      .setStyle(ButtonStyle.Primary).setDisabled(!s.enabled));
+    actions.addComponents(
+      new ButtonBuilder().setCustomId('radio:wish').setLabel(t('panel_wish')).setEmoji('🎵')
+        .setStyle(ButtonStyle.Primary).setDisabled(!s.enabled),
+      new ButtonBuilder().setCustomId('radio:playlist').setLabel(t('panel_playlist')).setEmoji('📃')
+        .setStyle(ButtonStyle.Primary).setDisabled(!s.enabled),
+    );
   }
   if (s.track) {
     actions.addComponents(new ButtonBuilder().setCustomId('radio:skip').setLabel(t('panel_skip')).setEmoji('⏭️')
+      .setStyle(ButtonStyle.Secondary));
+  }
+  if (s.playlist) {
+    actions.addComponents(new ButtonBuilder().setCustomId('radio:playlist-skip').setLabel(t('panel_playlist_skip')).setEmoji('⏹️')
       .setStyle(ButtonStyle.Secondary));
   }
   const components: ActionRowBuilder<StringSelectMenuBuilder | ButtonBuilder>[] = [
@@ -167,6 +185,16 @@ export function wishModal(): ModalBuilder {
     new ActionRowBuilder<TextInputBuilder>().addComponents(
       new TextInputBuilder().setCustomId('link').setLabel(t('wish_modal_label')).setStyle(TextInputStyle.Short)
         .setPlaceholder('https://www.youtube.com/watch?v=…').setRequired(true).setMaxLength(300),
+    ),
+  );
+}
+
+/** Das Formular hinter dem Playlist-Button. */
+export function playlistModal(): ModalBuilder {
+  return new ModalBuilder().setCustomId('radio:playlist').setTitle(t('playlist_modal_title')).addComponents(
+    new ActionRowBuilder<TextInputBuilder>().addComponents(
+      new TextInputBuilder().setCustomId('link').setLabel(t('playlist_modal_label')).setStyle(TextInputStyle.Short)
+        .setPlaceholder('https://www.youtube.com/playlist?list=…').setRequired(true).setMaxLength(300),
     ),
   );
 }

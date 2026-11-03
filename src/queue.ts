@@ -12,6 +12,10 @@ import { t } from './texts.js';
  * Länge und lädt die Tonspur vorab herunter; gespielt wird die fertige Datei.
  * Das ist verlässlicher als direktes Streamen: keine ablaufenden Stream-URLs,
  * keine Abbrüche mitten im Song. Die Schlange lebt nur im Arbeitsspeicher.
+ *
+ * Daneben höchstens eine Playlist: Sie spielt, wenn keine Wünsche anstehen,
+ * und erst wenn sie durch ist, kommt wieder das Radio. Geladen werden nur der
+ * laufende Song und der nächste, nicht die ganze Liste auf einmal.
  */
 
 export type Track = {
@@ -28,10 +32,42 @@ export type Track = {
   status: 'loading' | 'ready';
   /** Sekunden, an denen es nach einer Unterbrechung weitergeht. */
   resumeAt?: number;
+  /** Gesetzt, wenn der Song aus einer Playlist kommt. */
+  playlistId?: string;
+  /** Stelle in der Playlist, ab 0. */
+  entryIndex?: number;
 };
 export type TrackInfo = { title: string; duration: number; isLive: boolean; source: string; url: string; thumbnail: string | null };
 export type WishError = 'link' | 'full' | 'limit' | 'live' | 'long' | 'failed';
 export type WishResult = { track: Track; position: number } | { error: WishError; detail?: string };
+
+/** Ein Eintrag aus der Playlist, noch nicht heruntergeladen. SoundCloud nennt den Titel erst beim Download. */
+export type PlaylistEntry = { id: string | null; url: string; title: string | null; duration: number; thumbnail: string | null };
+export type PlaylistInfo = { title: string; source: string; url: string; entries: PlaylistEntry[] };
+/** Was Panel und Befehle über die laufende Playlist wissen müssen. */
+export type PlaylistView = {
+  id: string;
+  title: string;
+  url: string;
+  requesterId: string;
+  /** Stelle des aktuellen Songs, ab 1. */
+  position: number;
+  total: number;
+};
+export type PlaylistError = 'link' | 'running' | 'empty' | 'failed';
+export type PlaylistResult = { playlist: PlaylistView; count: number } | { error: PlaylistError; detail?: string };
+
+type Playlist = Omit<PlaylistView, 'position'> & {
+  source: string;
+  team: boolean;
+  entries: PlaylistEntry[];
+  /** Der aktuelle Song und der nächste, fertig oder im Download. */
+  buffer: Track[];
+  /** Der nächste Eintrag, der in den Puffer kommt. */
+  nextEntry: number;
+  /** Downloads, die nacheinander gescheitert sind. */
+  failures: number;
+};
 
 const HOSTS = new Set([
   'youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com', 'youtu.be',
@@ -39,19 +75,35 @@ const HOSTS = new Set([
 ]);
 
 const queue: Track[] = [];
+let list: Playlist | null = null;
 let nextId = 1;
 let pumping = false;
 const listeners = new Set<(event?: string) => void>();
 
+/** Einträge einer SoundCloud-Playlist zeigen manchmal auf die API statt auf die Seite. */
+const ENTRY_HOSTS = new Set([...HOSTS, 'api.soundcloud.com', 'api-v2.soundcloud.com']);
+
 /** Nur YouTube und SoundCloud: yt-dlp soll keine beliebigen Seiten abrufen. */
-export function supportedLink(input: string): URL | null {
+export function supportedLink(input: string, hosts: ReadonlySet<string> = HOSTS): URL | null {
   try {
     const url = new URL(input.trim());
     if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
-    return HOSTS.has(url.hostname.toLowerCase()) ? url : null;
+    return hosts.has(url.hostname.toLowerCase()) ? url : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * Zeigt der Link eindeutig auf eine Playlist? `…/playlist?list=…` und
+ * SoundCloud-Sets ja. Ein Video aus einer Playlist (`watch?v=…&list=…`) bleibt
+ * ein einzelner Wunsch; als Playlist geht es über den Playlist-Befehl.
+ */
+export function isPlaylistLink(url: URL): boolean {
+  const host = url.hostname.toLowerCase();
+  if (host.endsWith('soundcloud.com')) return /^\/[^/]+\/sets\/[^/]+/.test(url.pathname);
+  if (host === 'youtu.be') return false;
+  return url.searchParams.has('list') && !url.searchParams.has('v');
 }
 
 /** radio.ts hört zu; `event` landet als letzte Änderung im Panel. */
@@ -69,6 +121,18 @@ export function tracks(): readonly Track[] {
 
 export function head(): Track | undefined {
   return queue[0];
+}
+
+/** Die laufende Playlist, oder null. */
+export function playlist(): PlaylistView | null {
+  if (!list) return null;
+  const { id, title, url, requesterId, total } = list;
+  return { id, title, url, requesterId, total, position: (list.buffer[0]?.entryIndex ?? list.nextEntry) + 1 };
+}
+
+/** Der Song der Playlist, der als Nächstes dran ist oder gerade läuft. */
+export function playlistHead(): Track | undefined {
+  return list?.buffer[0];
 }
 
 // ================================================================= yt-dlp
@@ -107,7 +171,7 @@ function runYtDlp(args: string[], timeoutMs: number): Promise<string> {
       fail(new Error(`cookie file not readable: ${(error as Error).message}`));
       return;
     }
-    const child = spawn(env.ytDlp, ['--no-playlist', '--no-warnings', '--js-runtimes', 'node', ...extra, ...args],
+    const child = spawn(env.ytDlp, ['--no-warnings', '--js-runtimes', 'node', ...extra, ...args],
       { stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     let err = '';
@@ -133,7 +197,7 @@ export function ytDlpError(stderr: string): string | null {
 }
 
 export async function probe(url: string): Promise<TrackInfo> {
-  const json = JSON.parse(await run(['--dump-single-json', '--', url], 45_000)) as Record<string, unknown>;
+  const json = JSON.parse(await run(['--no-playlist', '--dump-single-json', '--', url], 45_000)) as Record<string, unknown>;
   return {
     title: typeof json.title === 'string' ? json.title : url,
     duration: Math.round(Number(json.duration) || 0),
@@ -142,6 +206,40 @@ export async function probe(url: string): Promise<TrackInfo> {
     url: typeof json.webpage_url === 'string' ? json.webpage_url : url,
     thumbnail: typeof json.thumbnail === 'string' && json.thumbnail.startsWith('https://') ? json.thumbnail : null,
   };
+}
+
+export class NotAPlaylist extends Error {}
+
+/**
+ * Nur das Inhaltsverzeichnis (`--flat-playlist`): ein paar Anfragen statt
+ * eine pro Song. Private, gelöschte und Livestreams fliegen gleich raus.
+ */
+export async function probePlaylist(url: string, limit = RULES.playlistMax): Promise<PlaylistInfo> {
+  const json = JSON.parse(await run(['--yes-playlist', '--flat-playlist', '--playlist-end', String(limit),
+    '--dump-single-json', '--', url], 120_000)) as Record<string, unknown>;
+  if (json._type !== 'playlist' || !Array.isArray(json.entries)) throw new NotAPlaylist('not a playlist');
+  return {
+    title: typeof json.title === 'string' && json.title.trim() ? json.title.trim() : 'Playlist',
+    source: typeof json.extractor_key === 'string' ? json.extractor_key.replace(/(Tab|Set|Playlist)$/, '') : 'Link',
+    url: typeof json.webpage_url === 'string' ? json.webpage_url : url,
+    entries: json.entries.map((raw) => playlistEntry(raw as Record<string, unknown>)).filter((entry) => entry !== null),
+  };
+}
+
+export function playlistEntry(raw: Record<string, unknown> | null): PlaylistEntry | null {
+  if (!raw) return null;
+  const id = typeof raw.id === 'string' ? raw.id : null;
+  const youtube = raw.ie_key === 'Youtube';
+  const url = typeof raw.url === 'string' ? raw.url : youtube && id ? `https://www.youtube.com/watch?v=${id}` : null;
+  if (!url || !supportedLink(url, ENTRY_HOSTS)) return null;
+  const title = typeof raw.title === 'string' && raw.title.trim() ? raw.title.trim() : null;
+  if (title && /^\[(private|deleted) video\]$/i.test(title)) return null;
+  if (raw.is_live === true || raw.live_status === 'is_live' || raw.live_status === 'is_upcoming') return null;
+  const thumbnails = Array.isArray(raw.thumbnails) ? raw.thumbnails as Array<{ url?: unknown }> : [];
+  const last = thumbnails.at(-1)?.url;
+  const thumbnail = youtube && id ? `https://i.ytimg.com/vi/${id}/hqdefault.jpg`
+    : typeof last === 'string' && last.startsWith('https://') ? last : null;
+  return { id, url, title, duration: Math.round(Number(raw.duration) || 0), thumbnail };
 }
 
 // ================================================================= Wünsche
@@ -204,6 +302,104 @@ export function clearQueue(event?: string): number {
   return count;
 }
 
+// ================================================================ Playlist
+
+/**
+ * Lädt das Inhaltsverzeichnis und startet die Playlist. Läuft schon eine,
+ * ersetzt nur das Team sie. Ohne Team-Rechte gelten die Grenzen der Wünsche
+ * pro Song: zu lange Titel werden ausgelassen.
+ */
+export async function addPlaylist(link: string, requesterId: string, team: boolean,
+  options: { shuffle?: boolean; announce?: (playlist: PlaylistView, count: number) => string } = {}): Promise<PlaylistResult> {
+  const url = supportedLink(link);
+  if (!url) return { error: 'link' };
+  if (list && !team) return { error: 'running' };
+
+  let info: PlaylistInfo;
+  try {
+    info = await probePlaylist(url.href);
+  } catch (error) {
+    if (error instanceof NotAPlaylist) return { error: 'link' };
+    return { error: 'failed', detail: error instanceof Error ? error.message : String(error) };
+  }
+  let entries = team ? info.entries : info.entries.filter((entry) => entry.duration <= RULES.maxTrackMinutes * 60);
+  // Ein Video aus der Playlist im Link: dort anfangen.
+  const start = entries.findIndex((entry) => entry.id !== null && entry.id === url.searchParams.get('v'));
+  if (start > 0) entries = entries.slice(start);
+  if (options.shuffle) entries = shuffled(entries);
+  if (entries.length === 0) return { error: 'empty' };
+  // Während des Abrufs kann jemand anderes eine Playlist gestartet haben.
+  if (list && !team) return { error: 'running' };
+
+  dropPlaylist();
+  list = {
+    id: `p${nextId++}`, title: info.title, url: info.url, source: info.source, requesterId, team,
+    entries, total: entries.length, buffer: [], nextEntry: 0, failures: 0,
+  };
+  fillBuffer(list);
+  const view = playlist()!;
+  changed(options.announce?.(view, entries.length));
+  void pump();
+  return { playlist: view, count: entries.length };
+}
+
+/** Fisher-Yates, damit jede Reihenfolge gleich wahrscheinlich ist. */
+export function shuffled<T>(items: readonly T[], random = Math.random): T[] {
+  const copy = [...items];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
+/** Aktueller Song plus einer im Voraus, damit es ohne Pause weitergeht. */
+function fillBuffer(p: Playlist): void {
+  while (p.buffer.length < 2 && p.nextEntry < p.entries.length) {
+    const entry = p.entries[p.nextEntry];
+    p.buffer.push({
+      id: `p${nextId++}`, source: p.source, title: entry.title ?? `${p.title} #${p.nextEntry + 1}`,
+      duration: entry.duration, url: entry.url, requesterId: p.requesterId, thumbnail: entry.thumbnail,
+      file: null, status: 'loading', playlistId: p.id, entryIndex: p.nextEntry,
+    });
+    p.nextEntry++;
+  }
+}
+
+/**
+ * Der aktuelle Song der Playlist ist gelaufen oder übersprungen. War es der
+ * letzte, ist die Playlist vorbei und das Radio kommt zurück.
+ */
+export function finishPlaylistTrack(event?: string): Track | undefined {
+  const p = list;
+  if (!p) return undefined;
+  const done = p.buffer.shift();
+  removeFile(done);
+  fillBuffer(p);
+  if (p.buffer.length === 0) {
+    list = null;
+    changed(event ?? t('event_playlist_done', { title: p.title }));
+    return done;
+  }
+  changed(event);
+  void pump();
+  return done;
+}
+
+/** Die ganze Playlist überspringen. */
+export function clearPlaylist(event?: string): PlaylistView | null {
+  const view = playlist();
+  if (!view) return null;
+  dropPlaylist();
+  changed(event);
+  return view;
+}
+
+function dropPlaylist(): void {
+  for (const track of list?.buffer ?? []) removeFile(track);
+  list = null;
+}
+
 function removeFile(track: Track | undefined): void {
   if (track?.file) rmSync(track.file, { force: true });
 }
@@ -218,36 +414,108 @@ export function resetCache(): void {
   mkdirSync(cacheDir(), { recursive: true });
 }
 
+/** yt-dlp meldet nach dem Download Pfad und Angaben als JSON in der letzten Zeile. */
+export type Download = { file: string; title: string | null; duration: number; thumbnail: string | null };
+
+export function parseDownload(out: string): Download | null {
+  const line = out.trim().split('\n').at(-1) ?? '';
+  if (!line) return null;
+  try {
+    const json = JSON.parse(line) as Record<string, unknown>;
+    if (typeof json.filepath !== 'string' || !json.filepath) return null;
+    return {
+      file: json.filepath,
+      title: typeof json.title === 'string' && json.title.trim() ? json.title.trim() : null,
+      duration: Math.round(Number(json.duration) || 0),
+      thumbnail: typeof json.thumbnail === 'string' && json.thumbnail.startsWith('https://') ? json.thumbnail : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Erst die Wünsche, dann die Playlist. */
+function nextToLoad(): Track | undefined {
+  return queue.find((track) => track.status === 'loading') ?? list?.buffer.find((track) => track.status === 'loading');
+}
+
+function stillWanted(track: Track): boolean {
+  return queue.includes(track) || Boolean(list?.buffer.includes(track));
+}
+
 /** Lädt die Titel der Reihe nach herunter, einer nach dem anderen. */
 async function pump(): Promise<void> {
   if (pumping) return;
   pumping = true;
   try {
     for (;;) {
-      const next = queue.find((track) => track.status === 'loading');
+      const next = nextToLoad();
       if (!next) break;
+      const owner = next.playlistId ? list : null;
       try {
         mkdirSync(cacheDir(), { recursive: true });
         // Drei Minuten plus Zeit für lange Titel: Ein Stunden-Mix braucht länger.
-        const timeoutMs = 180_000 + next.duration * 200;
-        const out = await run(['-f', 'bestaudio/best', '--no-progress', '--quiet',
-          '-o', join(cacheDir(), `${next.id}.%(ext)s`), '--print', 'after_move:filepath', '--', next.url], timeoutMs);
-        const file = out.trim().split('\n').at(-1) ?? '';
-        if (!queue.includes(next)) {
-          rmSync(file, { force: true });
+        // Ohne bekannte Länge (SoundCloud-Playlists) mit Luft für eine halbe Stunde.
+        const timeoutMs = 180_000 + (next.duration || 1800) * 200;
+        // Playlist-Songs sind nicht einzeln geprüft: keine Livestreams, ohne Team nichts zu Langes.
+        const filter = owner ? ['--match-filter', owner.team ? '!is_live' : `!is_live & duration <=? ${RULES.maxTrackMinutes * 60}`] : [];
+        const out = await run(['--no-playlist', ...filter, '-f', 'bestaudio/best', '--no-progress', '--quiet',
+          '-o', join(cacheDir(), `${next.id}.%(ext)s`),
+          '--print', 'after_move:%(.{filepath,title,duration,thumbnail})j', '--', next.url], timeoutMs);
+        const download = parseDownload(out);
+        // Kein Pfad heißt: vom Filter ausgelassen.
+        if (!download) throw new Error(owner ? 'skipped by filter (live or too long)' : 'no file');
+        if (!stillWanted(next)) {
+          rmSync(download.file, { force: true });
           continue;
         }
-        next.file = file;
+        next.file = download.file;
         next.status = 'ready';
+        // SoundCloud nennt Titel und Länge einer Playlist erst hier.
+        if (next.playlistId) {
+          if (download.title) next.title = download.title;
+          if (download.duration) next.duration = download.duration;
+          next.thumbnail ??= download.thumbnail;
+          if (owner) owner.failures = 0;
+        }
         changed();
       } catch (error) {
         log.warn('Queue: could not load track', { title: next.title, error: String(error) });
-        const index = queue.indexOf(next);
-        if (index !== -1) queue.splice(index, 1);
-        changed(t('event_wish_failed', { title: next.title }));
+        // Aus einer inzwischen ersetzten Playlist: nichts zu melden.
+        if (next.playlistId) {
+          if (owner && owner === list) playlistTrackFailed(owner, next);
+        } else {
+          const index = queue.indexOf(next);
+          if (index !== -1) queue.splice(index, 1);
+          changed(t('event_wish_failed', { title: next.title }));
+        }
       }
     }
   } finally {
     pumping = false;
   }
+}
+
+/**
+ * Ein Song der Playlist lässt sich nicht laden: auslassen und den nächsten
+ * holen. Scheitern mehrere hintereinander, stimmt etwas Grundsätzliches nicht
+ * (etwa YouTube sperrt), dann endet die Playlist, statt sie durchzuprobieren.
+ */
+function playlistTrackFailed(p: Playlist, track: Track): void {
+  const index = p.buffer.indexOf(track);
+  if (index === -1) return;
+  p.buffer.splice(index, 1);
+  p.failures++;
+  if (p.failures >= RULES.playlistMaxFailures) {
+    dropPlaylist();
+    changed(t('event_playlist_broken', { title: p.title }));
+    return;
+  }
+  fillBuffer(p);
+  if (p.buffer.length === 0) {
+    list = null;
+    changed(t('event_playlist_done', { title: p.title }));
+    return;
+  }
+  changed(t('event_wish_failed', { title: track.title }));
 }

@@ -30,19 +30,52 @@ const catalog = new Map([
   ['https://youtu.be/drei', { title: 'Dritter Song', duration: 150, extractor_key: 'Youtube' }],
   ['https://www.youtube.com/watch?v=lang', { title: 'Mix (1 Stunde)', duration: 3600, extractor_key: 'Youtube' }],
   ['https://www.youtube.com/watch?v=live', { title: 'Lofi Radio 24/7', duration: 0, is_live: true, extractor_key: 'Youtube' }],
+  ['https://www.youtube.com/watch?v=vier', { title: 'Vierter Song', duration: 200, extractor_key: 'Youtube' }],
+  ['https://www.youtube.com/watch?v=fuenf', { title: 'Fünfter Song', duration: 210, extractor_key: 'Youtube' }],
+  ['https://api.soundcloud.com/tracks/77', { title: 'Langer API-Song', duration: 900, extractor_key: 'Soundcloud' }],
+  ['https://soundcloud.com/ncs/vier', { title: 'Vierter SC-Song', duration: 240, extractor_key: 'Soundcloud' }],
+]);
+// Playlists, wie yt-dlp sie mit --flat-playlist liefert: SoundCloud ohne Titel und Länge.
+const yt = (id, title, duration) => ({ _type: 'url', ie_key: 'Youtube', id, url: `https://www.youtube.com/watch?v=${id}`, title, duration });
+const sc = (url, id) => ({ _type: 'url_transparent', ie_key: 'Soundcloud', id, url, title: null, duration: null });
+const playlists = new Map([
+  ['PLfocus', { title: 'Focus Mix', extractor_key: 'YoutubeTab', webpage_url: 'https://www.youtube.com/playlist?list=PLfocus', entries: [
+    yt('kurz', 'Kurzer Song', 180), yt('privat', '[Private video]', null), yt('lang', 'Mix (1 Stunde)', 3600),
+    yt('vier', 'Vierter Song', 200), yt('fuenf', 'Fünfter Song', 210),
+  ] }],
+  ['https://soundcloud.com/ncs/sets/best', { title: 'Best of', extractor_key: 'SoundcloudSet', webpage_url: 'https://soundcloud.com/ncs/sets/best', entries: [
+    sc('https://soundcloud.com/ncs/zwei', '1'), sc('https://api.soundcloud.com/tracks/77', '77'), sc('https://soundcloud.com/ncs/vier', '4'),
+  ] }],
+  ['PLkaputt', { title: 'Kaputt', extractor_key: 'YoutubeTab', webpage_url: 'https://www.youtube.com/playlist?list=PLkaputt',
+    entries: [1, 2, 3, 4, 5, 6].map((n) => yt(`k${n}`, `K${n}`, 100)) }],
 ]);
 const failDownload = new Set();
+/** Jeder Download mit seinen Argumenten, für die Playlist-Tests. */
+const downloads = [];
 queue.useRunner(async (args) => {
   const url = args.at(-1);
+  if (args.includes('--flat-playlist')) {
+    const list = playlists.get(new URL(url).searchParams.get('list') ?? url);
+    if (list) return JSON.stringify({ _type: 'playlist', ...list });
+    const info = catalog.get(url);
+    if (!info) throw new Error('Video unavailable');
+    return JSON.stringify({ _type: 'video', ...info, webpage_url: url });
+  }
   if (args.includes('--dump-single-json')) {
     const info = catalog.get(url);
     if (!info) throw new Error('Video unavailable');
     return JSON.stringify({ ...info, webpage_url: url });
   }
+  const info = catalog.get(url);
+  if (!info) throw new Error('Video unavailable');
   if (failDownload.has(url)) throw new Error('HTTP Error 403: Forbidden');
+  downloads.push({ url, args });
+  // --match-filter wie yt-dlp: ausgelassen heißt, es kommt nichts zurück.
+  const filter = args.includes('--match-filter') ? args[args.indexOf('--match-filter') + 1] : '';
+  if (info.duration > Number(/duration <=\? (\d+)/.exec(filter)?.[1] ?? Infinity)) return '';
   const file = args[args.indexOf('-o') + 1].replace('%(ext)s', 'webm');
   writeFileSync(file, 'ton');
-  return `${file}\n`;
+  return `${JSON.stringify({ filepath: file, title: info.title, duration: info.duration })}\n`;
 });
 /** Warten, bis die Attrappe alle Downloads „fertig“ hat. */
 const settle = async () => { for (let i = 0; i < 5; i++) await tick(); };
@@ -115,6 +148,17 @@ function command(m) {
     async reply(payload) { replies.push(payload); },
   };
 }
+/** Ein Befehl, der erst „denkt …“ zeigt und dann die Antwort nachreicht. */
+function deferred(m) {
+  const replies = [];
+  return {
+    member: m, user: { id: m.id }, replies,
+    async reply(payload) { replies.push(payload); },
+    async deferReply() {},
+    async editReply(payload) { replies.push(payload); },
+  };
+}
+const lastReply = (interaction) => interaction.replies.at(-1).content;
 /** Das Panel, wie es gerade im Kanal steht. */
 async function panelNow() {
   await panel.flushPanel();
@@ -218,9 +262,13 @@ test('Bitrate folgt dem Kanal, nie unter der Quelle und nie über Opus', () => {
 
 test('Befehl /radio mit Sender-Auswahl, Anzeige und Schalter fürs Team', () => {
   const definition = radioCommand();
-  assert.deepEqual(definition.options.map((o) => o.name), ['station', 'now', 'volume', 'request', 'skip', 'clear', 'off', 'on']);
+  assert.deepEqual(definition.options.map((o) => o.name),
+    ['station', 'now', 'volume', 'request', 'playlist', 'skip', 'playlist-skip', 'clear', 'off', 'on']);
   assert.deepEqual(definition.options.map((o) => o.name_localizations?.de ?? o.name),
-    ['sender', 'jetzt', 'lautstärke', 'wunsch', 'skip', 'leeren', 'aus', 'an'], 'auf Deutsch wie bisher');
+    ['sender', 'jetzt', 'lautstärke', 'wunsch', 'playlist', 'skip', 'playlist-überspringen', 'leeren', 'aus', 'an'], 'auf Deutsch wie bisher');
+  const playlistOptions = definition.options[4].options;
+  assert.deepEqual(playlistOptions.map((o) => [o.name, o.name_localizations?.de ?? o.name, o.required ?? false]),
+    [['link', 'link', true], ['shuffle', 'zufällig', false]]);
   assert(definition.options.every((o) => o.description_localizations?.de), 'jede Beschreibung auch auf Deutsch');
   const volume = definition.options[2].options[0];
   assert.deepEqual([volume.name, volume.name_localizations.de, volume.min_value, volume.max_value, volume.required ?? false],
@@ -591,7 +639,7 @@ test('Panel zeigt den laufenden Wunsch und einen Überspringen-Button', () => {
   assert.equal(payload.embeds[0].data.url, 'https://www.youtube.com/watch?v=K4DyBUG242c');
   assert.match(payload.embeds[0].data.description, /von <@42> · 3:28 · Youtube/);
   assert.match(payload.embeds[0].data.fields[0].value, /Danach wieder 📻 \*\*Lofi\*\*/);
-  assert.deepEqual(payload.components[1].components.map((b) => b.data.custom_id), ['radio:wish', 'radio:skip']);
+  assert.deepEqual(payload.components[1].components.map((b) => b.data.custom_id), ['radio:wish', 'radio:playlist', 'radio:skip']);
   assert.equal(panel.statusText(snapshot, 'egal'), '▶️ Cartoon – On & On');
   assert.equal(panel.formatDuration(61), '1:01');
 });
@@ -641,6 +689,162 @@ test('die Auswahl markiert den laufenden Sender', async () => {
   assert.equal(choices.length, 6);
   assert(choices.every((choice) => choice.value.startsWith('ncs')));
   assert.equal(choices.find((choice) => choice.value === 'ncs-phonk').name, t('choice_current', { station: 'NCS Phonk' }));
+});
+
+test('Playlist-Links erkennen, Einträge lesen, mischen', () => {
+  const is = (link) => queue.isPlaylistLink(new URL(link));
+  assert.equal(is('https://www.youtube.com/playlist?list=PL123'), true);
+  assert.equal(is('https://music.youtube.com/playlist?list=PL123'), true);
+  assert.equal(is('https://soundcloud.com/ncs/sets/best-of'), true);
+  assert.equal(is('https://www.youtube.com/watch?v=abc&list=PL123'), false, 'ein Video aus einer Playlist bleibt ein Wunsch');
+  assert.equal(is('https://youtu.be/abc?list=PL123'), false);
+  assert.equal(is('https://soundcloud.com/ncs/song'), false);
+  assert.equal(is('https://www.youtube.com/watch?v=abc'), false);
+
+  assert.deepEqual(queue.playlistEntry({ ie_key: 'Youtube', id: 'abc', url: 'https://www.youtube.com/watch?v=abc', title: 'Song', duration: 201.6 }),
+    { id: 'abc', url: 'https://www.youtube.com/watch?v=abc', title: 'Song', duration: 202, thumbnail: 'https://i.ytimg.com/vi/abc/hqdefault.jpg' });
+  assert.equal(queue.playlistEntry({ ie_key: 'Youtube', id: 'abc' }).url, 'https://www.youtube.com/watch?v=abc', 'die ID reicht');
+  assert.equal(queue.playlistEntry({ ie_key: 'Youtube', id: 'p', url: 'https://www.youtube.com/watch?v=p', title: '[Private video]' }), null);
+  assert.equal(queue.playlistEntry({ ie_key: 'Youtube', id: 'd', url: 'https://www.youtube.com/watch?v=d', title: '[Deleted video]' }), null);
+  assert.equal(queue.playlistEntry({ ie_key: 'Youtube', id: 'l', url: 'https://www.youtube.com/watch?v=l', title: 'Live', live_status: 'is_live' }), null);
+  assert.equal(queue.playlistEntry({ url: 'https://evil.example/x', title: 'x' }), null, 'nur YouTube und SoundCloud');
+  assert.equal(queue.playlistEntry(null), null);
+  assert.deepEqual(queue.playlistEntry({ ie_key: 'Soundcloud', id: '77', url: 'https://api.soundcloud.com/tracks/77', title: null, duration: null }),
+    { id: '77', url: 'https://api.soundcloud.com/tracks/77', title: null, duration: 0, thumbnail: null }, 'SoundCloud-API-Links sind erlaubt');
+
+  // Mit festem Zufall: alles bleibt drin, nur die Reihenfolge ändert sich.
+  const mixed = queue.shuffled([1, 2, 3, 4], () => 0);
+  assert.deepEqual(mixed, [2, 3, 4, 1]);
+  assert.deepEqual(queue.parseDownload('{"filepath": "/tmp/a.webm", "title": "A", "duration": 184.3}\n'),
+    { file: '/tmp/a.webm', title: 'A', duration: 184, thumbnail: null });
+  assert.equal(queue.parseDownload(''), null, 'vom Filter ausgelassen');
+  assert.equal(queue.parseDownload('kein json'), null);
+});
+
+test('Playlist: startet per Link, lädt nur zwei Songs vor, Wünsche zuerst, Song und Playlist überspringen', async () => {
+  const [starter, other] = [member(), member()];
+  enter(starter); enter(other);
+  const before = downloads.length;
+  // Ein reiner Playlist-Link im Wunsch-Formular startet die Playlist.
+  const start = deferred(starter);
+  await radio.requestWish(start, 'https://www.youtube.com/playlist?list=PLfocus');
+  assert.equal(lastReply(start), t('playlist_added', { title: 'Focus Mix', count: 3 }), 'ohne privates Video und ohne den Stunden-Mix');
+  await settle();
+  assert.deepEqual([queue.playlist().title, queue.playlist().position, queue.playlist().total], ['Focus Mix', 1, 3]);
+  assert.equal(queue.playlistHead().status, 'ready');
+  assert.deepEqual(downloads.slice(before).map((d) => d.url),
+    ['https://www.youtube.com/watch?v=kurz', 'https://www.youtube.com/watch?v=vier'], 'der laufende und der nächste, nicht alle');
+  const args = downloads.at(-1).args;
+  assert.equal(args[args.indexOf('--match-filter') + 1], '!is_live & duration <=? 600', 'ohne Team keine langen Songs');
+  assert(args.includes('--no-playlist'));
+
+  // Eine zweite Playlist ersetzt nur das Team.
+  const second = deferred(other);
+  await radio.requestPlaylist(second, 'https://soundcloud.com/ncs/sets/best');
+  assert.equal(lastReply(second), t('playlist_running', { title: 'Focus Mix' }));
+
+  const first = queue.playlistHead();
+  radio.pretendPlaying(first.id);
+  const message = await panelNow();
+  assert.equal(message.embeds[0].data.author.name, t('panel_author_playlist', { name: env.name }));
+  assert.equal(message.embeds[0].data.title, '▶️ Kurzer Song');
+  assert(text(message).includes(`📃 Focus Mix · Song 1/3 · 3:00 · von <@${starter.id}>`));
+  assert(text(message).includes(`📃 Playlist **Focus Mix** · 2 übrig · von <@${starter.id}>`));
+  assert.deepEqual(message.components[1].components.map((b) => b.data.custom_id),
+    ['radio:wish', 'radio:playlist', 'radio:skip', 'radio:playlist-skip']);
+  assert.equal(panel.statusText(radio.radioSnapshot(), null), '▶️ Kurzer Song');
+
+  // Wer die Playlist gestartet hat, überspringt Songs sofort.
+  const skip = command(starter);
+  await radio.requestSkip(skip);
+  assert.equal(skip.replies[0].content, t('skipped', { title: 'Kurzer Song' }));
+  assert.equal(existsSync(first.file), false, 'die Datei ist gleich wieder weg');
+  await settle();
+  assert.equal(queue.playlistHead().title, 'Vierter Song');
+  assert.equal(queue.playlist().position, 2);
+
+  // Ein Wunsch unterbricht den laufenden Playlist-Song nicht, kommt aber danach als Erstes.
+  radio.pretendPlaying(queue.playlistHead().id);
+  await radio.requestWish(deferred(other), 'https://soundcloud.com/ncs/zwei');
+  await settle();
+  assert.equal(radio.nextTrack(), queue.playlistHead(), 'der laufende Song spielt zu Ende');
+  radio.pretendPlaying(null);
+  assert.equal(radio.nextTrack(), queue.head(), 'danach zuerst der Wunsch');
+  assert.match(text(await panelNow()), /`1\.` Zweiter Song[\s\S]*📃 Playlist \*\*Focus Mix\*\* · 2 übrig[\s\S]*Danach wieder/);
+  queue.clearQueue();
+  assert.equal(radio.nextTrack(), queue.playlistHead(), 'ohne Wünsche wieder die Playlist');
+
+  // Die ganze Playlist: andere stimmen ab.
+  const files = [queue.playlistHead().file];
+  const ask = command(other);
+  await radio.requestPlaylistSkip(ask);
+  assert.equal(ask.replies[0].content, t('playlist_vote_started', { title: 'Focus Mix' }));
+  assert.match(text(await panelNow()), /🗳️ Playlist „Focus Mix“ überspringen\?/);
+  await click(starter, 'yes');
+  assert.equal(queue.playlist(), null);
+  assert(files.every((file) => !existsSync(file)), 'heruntergeladene Songs sind weg');
+  const after = await panelNow();
+  assert(text(after).includes(t('event_playlist_passed', { title: 'Focus Mix' })));
+  assert.deepEqual(after.components[1].components.map((b) => b.data.custom_id), ['radio:wish', 'radio:playlist']);
+
+  const none = command(other);
+  await radio.requestPlaylistSkip(none);
+  assert.equal(none.replies[0].content, t('playlist_nothing'));
+  empty();
+});
+
+test('Playlist: das Team ersetzt eine laufende, beginnt beim Video im Link, danach kommt das Radio', async () => {
+  const m = member();
+  enter(m);
+  await radio.requestPlaylist(deferred(m), 'https://www.youtube.com/playlist?list=PLfocus');
+  const admin = member({ staff: true });
+  const replace = deferred(admin);
+  await radio.requestPlaylist(replace, 'https://www.youtube.com/watch?v=vier&list=PLfocus');
+  assert.equal(lastReply(replace), t('playlist_added', { title: 'Focus Mix', count: 2 }), 'ab dem vierten Song, das Team auch mit langen');
+  assert.equal(queue.playlist().requesterId, admin.id);
+  await settle();
+  assert.equal(queue.playlistHead().title, 'Vierter Song');
+  assert.equal(downloads.at(-1).args[downloads.at(-1).args.indexOf('--match-filter') + 1], '!is_live', 'Team: keine Längengrenze');
+
+  queue.finishPlaylistTrack();
+  await settle();
+  assert.equal(queue.playlistHead().title, 'Fünfter Song');
+  queue.finishPlaylistTrack();
+  assert.equal(queue.playlist(), null);
+  assert(text(await panelNow()).includes(t('event_playlist_done', { title: 'Focus Mix' })));
+
+  const single = deferred(admin);
+  await radio.requestPlaylist(single, 'https://www.youtube.com/watch?v=kurz');
+  assert.equal(lastReply(single), t('playlist_link'), 'ein einzelnes Video ist keine Playlist');
+  const broken = deferred(admin);
+  await radio.requestPlaylist(broken, 'https://example.com/playlist?list=x');
+  assert.equal(lastReply(broken), t('playlist_link'));
+  empty();
+});
+
+test('Playlist: SoundCloud nennt Titel erst beim Download, zu Langes und Kaputtes wird ausgelassen', async () => {
+  const m = member();
+  enter(m);
+  await radio.requestPlaylist(deferred(m), 'https://soundcloud.com/ncs/sets/best');
+  await settle();
+  assert.equal(queue.playlistHead().title, 'Zweiter Song', 'Titel aus dem Download');
+  assert.equal(queue.playlistHead().duration, 200);
+  // Der 15-Minuten-Song fällt ohne Team-Rechte durch den Filter, der nächste rückt nach.
+  assert(text(await panelNow()).includes(t('event_wish_failed', { title: 'Best of #2' })));
+  queue.finishPlaylistTrack();
+  await settle();
+  assert.equal(queue.playlistHead().title, 'Vierter SC-Song');
+  assert.equal(queue.playlist().position, 3);
+  queue.clearPlaylist();
+
+  // Scheitern mehrere Songs hintereinander, endet die Playlist, statt alle durchzuprobieren.
+  const before = downloads.length;
+  await radio.requestPlaylist(deferred(m), 'https://www.youtube.com/playlist?list=PLkaputt');
+  await settle();
+  assert.equal(queue.playlist(), null);
+  assert.equal(downloads.length, before);
+  assert(text(await panelNow()).includes(t('event_playlist_broken', { title: 'Kaputt' })));
+  empty();
 });
 
 test('abgelehnt, sobald die Mehrheit unerreichbar ist, danach Pause', async () => {

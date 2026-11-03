@@ -3,7 +3,7 @@ import { ChannelType, Client, Events, GatewayIntentBits, MessageFlags, Permissio
 import { env } from './env.js';
 import { errorContext, log } from './logger.js';
 import { radioCommand } from './commands.js';
-import { handlePanelMessage, resetPanelSelection, startPanel, stopPanel, wishModal } from './panel.js';
+import { handlePanelMessage, playlistModal, resetPanelSelection, startPanel, stopPanel, wishModal } from './panel.js';
 import { loadState, target } from './settings.js';
 import { t } from './texts.js';
 import {
@@ -12,6 +12,8 @@ import {
   handleRadioCommand,
   handleRadioVoiceState,
   radioAutocomplete,
+  requestPlaylist,
+  requestPlaylistSkip,
   requestSkip,
   requestStation,
   requestWish,
@@ -90,13 +92,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
       resetPanelSelection();
     }
     if (interaction.isButton() && interaction.customId === 'radio:wish') await interaction.showModal(wishModal());
+    else if (interaction.isButton() && interaction.customId === 'radio:playlist') await interaction.showModal(playlistModal());
     else if (interaction.isButton() && interaction.customId === 'radio:skip') await requestSkip(interaction);
+    else if (interaction.isButton() && interaction.customId === 'radio:playlist-skip') await requestPlaylistSkip(interaction);
     else if (interaction.isButton() && interaction.customId.startsWith('radio:')) {
       const [, action, id] = interaction.customId.split(':');
       await handleRadioButton(interaction, action, id);
     }
     if (interaction.isModalSubmit() && interaction.customId === 'radio:wish') {
       await requestWish(interaction, interaction.fields.getTextInputValue('link'));
+    }
+    if (interaction.isModalSubmit() && interaction.customId === 'radio:playlist') {
+      await requestPlaylist(interaction, interaction.fields.getTextInputValue('link'));
     }
   } catch (error) {
     // Abgelaufen oder doppelt geklickt: Eine Antwort käme ohnehin nicht mehr an.

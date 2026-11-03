@@ -24,6 +24,7 @@ It was built for a coworking channel, where people sit together for hours and wa
 - **Live panel in the voice channel chat.** It shows the station, the current song with album cover, listeners, the queue and the last change. Pick a station from a dropdown, no command needed.
 - **Fair votes.** More yes than no wins, and people who don't vote don't block. The team switches instantly.
 - **Song requests** from YouTube and SoundCloud, with a queue, limits and vote-skip. You can turn them off.
+- **Playlists** from YouTube and SoundCloud: play a whole playlist, skip single songs or the entire playlist, then the radio comes back.
 - **Only plays when someone listens.** It reconnects by itself and backs off when a stream is down.
 - **Crisp sound.** It follows the channel bitrate, up to 384 kbit/s on boosted servers.
 - **Channel status.** The current song shows up under the channel name.
@@ -94,8 +95,10 @@ Everything also works from the panel. German Discord clients see the German name
 | `/radio station` | `/radio sender` | everyone | Team switches instantly, everyone else starts a vote |
 | `/radio now` | `/radio jetzt` | everyone | Station, current song and listeners |
 | `/radio volume [percent]` | `/radio lautstärke` | everyone / team | Shows the volume; the team sets it (1–100 %) |
-| `/radio request link` | `/radio wunsch` | listeners, team | Queues a song from YouTube or SoundCloud |
-| `/radio skip` | `/radio skip` | everyone | Skips the current request: team and requester instantly, others by vote |
+| `/radio request link` | `/radio wunsch` | listeners, team | Queues a song from YouTube or SoundCloud (a playlist link starts the playlist) |
+| `/radio playlist link [shuffle]` | `/radio playlist [zufällig]` | listeners, team | Plays a YouTube or SoundCloud playlist, optionally shuffled |
+| `/radio skip` | `/radio skip` | everyone | Skips the current request or playlist song: team and requester instantly, others by vote |
+| `/radio playlist-skip` | `/radio playlist-überspringen` | everyone | Skips the whole playlist: team and whoever started it instantly, others by vote |
 | `/radio clear` | `/radio leeren` | team | Empties the queue |
 | `/radio off` / `on` | `/radio aus` / `an` | team | Turns the radio off or on |
 
@@ -109,14 +112,22 @@ Everything also works from the panel. German Discord clients see the German name
 - Alone in the channel? Then the station switches right away.
 - After a vote, or after the team switches, there's a 3-minute pause before the next one.
 
-Skip votes work the same way with 30 seconds. All values are in [`src/settings.ts`](src/settings.ts).
+Skip votes (for a song or a whole playlist) work the same way with 30 seconds. All values are in [`src/settings.ts`](src/settings.ts).
 
 ## Song requests
 
 - Listeners can request songs; the team can also do it from outside the channel.
 - yt-dlp reads title and length and downloads the audio ahead of time, so playback doesn't stutter. Each file is deleted right after it has played.
 - While requests are queued the radio pauses, then the last station comes back.
-- Limits: up to 10 minutes per track, no livestreams, no playlists, 2 requests per person, 20 in total. The team has no length or per-person limit.
+- Limits: up to 10 minutes per track, no livestreams, 2 requests per person, 20 in total. The team has no length or per-person limit.
+
+## Playlists
+
+- Paste a playlist link (`youtube.com/playlist?list=…`, a SoundCloud set) into **📃 Playlist** in the panel, `/radio playlist` or the request form. A link to a video inside a playlist (`watch?v=…&list=…`) starts the playlist at that video when used with `/radio playlist`; in the request form it stays a single song.
+- Requests come first: they play between playlist songs, never in the middle of one. When the playlist is done, the radio comes back.
+- Only the current and the next song are downloaded, not the whole list. Private, deleted and live videos are left out.
+- **⏭️ Skip** skips the current playlist song, **⏹️ Skip playlist** the whole playlist. The team and whoever started the playlist skip instantly, everyone else by vote.
+- One playlist at a time, up to 500 songs. Only the team can replace a running one. Without team rights, songs over 10 minutes are left out.
 
 YouTube increasingly blocks yt-dlp, especially from datacenter IPs ("Sign in to confirm you're not a bot"). From a home connection it usually works. The Docker image ships the latest yt-dlp at build time. Set `RADIO_WISHES=off` to turn requests off completely; see also the [legal note](#legal).
 
@@ -194,7 +205,7 @@ With `RADIO_ERROR_CHANNEL_ID` set, voice connection errors also get posted to Di
 ```bash
 npm ci
 npm run dev        # starts with tsx, reads .env
-npm test           # permissions, votes, volume, bitrate, state, queue, panel, languages; no Discord, no audio
+npm test           # permissions, votes, volume, bitrate, state, queue, playlists, panel, languages; no Discord, no audio
 npm run typecheck
 ```
 
@@ -204,7 +215,7 @@ src/
   env.ts        environment variables
   settings.ts   stations, rules, state file
   radio.ts      voice connection, ffmpeg, votes, commands
-  queue.ts      song requests via yt-dlp
+  queue.ts      song requests and playlists via yt-dlp
   panel.ts      panel message, song titles, covers, channel status
   commands.ts   slash command definition (en + de)
   texts.ts      all texts in English and German
