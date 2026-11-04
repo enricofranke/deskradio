@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { mock, test } from 'node:test';
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -63,7 +63,9 @@ const slow = new Map();
 const failDownload = new Set();
 /** Jeder Download mit seinen Argumenten, für die Playlist-Tests. */
 const downloads = [];
-queue.useRunner(async (args) => {
+/** Downloads, die abgebrochen wurden, weil niemand sie mehr braucht. */
+const aborted = [];
+queue.useRunner(async (args, _timeoutMs, signal) => {
   const url = args.at(-1);
   if (args.includes('--flat-playlist')) {
     probes.push(url);
@@ -88,7 +90,13 @@ queue.useRunner(async (args) => {
   const file = args[args.indexOf('-o') + 1].replace('%(ext)s', 'webm');
   if (slow.has(url)) {
     writeFileSync(file, 'teil');
-    await slow.get(url);
+    await new Promise((resolve, reject) => {
+      slow.get(url).then(resolve);
+      signal?.addEventListener('abort', () => {
+        aborted.push(url);
+        reject(new Error('yt-dlp exited with code null'));
+      }, { once: true });
+    });
     appendFileSync(file, '-rest');
   } else writeFileSync(file, 'ton');
   return `${JSON.stringify({ filepath: file, title: info.title, duration: info.duration })}\n`;
@@ -967,6 +975,44 @@ test('ein YouTube-Song läuft schon, während er noch lädt, mittendrin weiter e
     slow.clear();
     Object.assign(queue.PARTIAL, { pollMs: 500, bytes: 256 * 1024 });
     queue.clearQueue();
+  }
+});
+
+test('während des Ladens nur abspielen, wenn genug da ist und der Download der Wiedergabe davonläuft', () => {
+  const kb = 1024;
+  assert.equal(queue.playableWhileLoading({ at: 0, size: 0 }, { at: 1000, size: 100 * kb }), false, 'noch zu wenig da');
+  assert.equal(queue.playableWhileLoading({ at: 0, size: 300 * kb }, { at: 0, size: 300 * kb }), true, 'beim ersten Blick schon genug');
+  assert.equal(queue.playableWhileLoading({ at: 0, size: 0 }, { at: 2000, size: 300 * kb }), true, '150 KB/s');
+  assert.equal(queue.playableWhileLoading({ at: 0, size: 0 }, { at: 10_000, size: 300 * kb }), false,
+    '30 KB/s: die Wiedergabe holt den Download ein, also erst spielen, wenn er ganz da ist');
+});
+
+test('übersprungen, während er noch lädt: Download bricht ab, der nächste Song lädt sofort', async () => {
+  const admin = member({ staff: true });
+  enter(admin);
+  Object.assign(queue.PARTIAL, { pollMs: 5 });
+  let release;
+  slow.set('https://www.youtube.com/watch?v=kurz', new Promise((resolve) => { release = resolve; }));
+  try {
+    await radio.requestPlaylist(deferred(admin), 'https://www.youtube.com/playlist?list=PLfocus');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const first = queue.playlistHead();
+    assert.equal(first.url, 'https://www.youtube.com/watch?v=kurz');
+    assert.equal(first.status, 'loading');
+    const before = downloads.length;
+    queue.finishPlaylistTrack();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.deepEqual(aborted, ['https://www.youtube.com/watch?v=kurz']);
+    assert.equal(downloads[before]?.url, queue.playlistHead().url, 'der nächste lädt, ohne auf den alten Download zu warten');
+    assert.equal(readdirSync(env.cacheDir).some((name) => name.startsWith(`${first.id}.`)), false, 'die halbe Datei ist weg');
+    assert.equal(queue.playlist().position, 2, 'kein Fehler, die Playlist läuft weiter');
+  } finally {
+    release?.();
+    slow.clear();
+    aborted.length = 0;
+    Object.assign(queue.PARTIAL, { pollMs: 500 });
+    queue.clearPlaylist();
+    await settle();
   }
 });
 

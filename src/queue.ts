@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { copyFileSync, mkdirSync, rmSync, statSync } from 'node:fs';
+import { copyFileSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { open, type FileHandle } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -160,7 +160,8 @@ export function playlistHead(): Track | undefined {
 
 // ================================================================= yt-dlp
 
-type Runner = (args: string[], timeoutMs: number) => Promise<string>;
+/** `signal` bricht einen Download ab, den niemand mehr braucht. */
+type Runner = (args: string[], timeoutMs: number, signal?: AbortSignal) => Promise<string>;
 let run: Runner = runYtDlp;
 
 /** Für Tests: yt-dlp durch eine Attrappe ersetzen. */
@@ -183,7 +184,7 @@ function cookieArgs(): string[] {
   return ['--cookies', cookieFile];
 }
 
-function runYtDlp(args: string[], timeoutMs: number): Promise<string> {
+function runYtDlp(args: string[], timeoutMs: number, signal?: AbortSignal): Promise<string> {
   return new Promise((done, fail) => {
     // Node als JavaScript-Laufzeit: YouTube verlangt inzwischen, dass yt-dlp
     // ein Skript ausführt, bevor es die Tonspur herausgibt.
@@ -201,12 +202,16 @@ function runYtDlp(args: string[], timeoutMs: number): Promise<string> {
     child.stdout.on('data', (chunk: Buffer) => { out += chunk.toString(); });
     child.stderr.on('data', (chunk: Buffer) => { err = (err + chunk.toString()).slice(-2000); });
     const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+    const stop = () => child.kill('SIGKILL');
+    signal?.addEventListener('abort', stop, { once: true });
     child.on('error', (error: NodeJS.ErrnoException) => {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', stop);
       fail(new Error(error.code === 'ENOENT' ? 'yt-dlp is not installed' : error.message));
     });
     child.on('close', (code) => {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', stop);
       if (code === 0) done(out);
       else fail(new Error(ytDlpError(err) ?? `yt-dlp exited with code ${code}`));
     });
@@ -479,6 +484,18 @@ function removeFile(track: Track | undefined): void {
   if (track?.file) rmSync(track.file, { force: true });
 }
 
+/** Alles, was der Download eines Titels hinterlassen hat, auch eine halbe Datei. */
+function removeDownload(track: Track): void {
+  removeFile(track);
+  try {
+    for (const name of readdirSync(cacheDir())) {
+      if (name.startsWith(`${track.id}.`)) rmSync(join(cacheDir(), name), { force: true });
+    }
+  } catch {
+    // Kein Cache-Ordner: nichts aufzuräumen.
+  }
+}
+
 function cacheDir(): string {
   return resolve(env.cacheDir);
 }
@@ -509,8 +526,26 @@ export function parseDownload(out: string): Download | null {
   }
 }
 
-/** Ab wann ein wachsender Download abgespielt wird, und wie oft nachgesehen wird. Für Tests veränderbar. */
-export const PARTIAL = { bytes: 256 * 1024, pollMs: 500 };
+/**
+ * Ab wann ein wachsender Download abgespielt wird, und wie oft nachgesehen wird.
+ * `minRate` (Bytes pro Sekunde): Ein Song braucht beim Abspielen rund 20 KB/s.
+ * Lädt er nicht deutlich schneller (ein langsamer Proxy-Ausgang), holt die
+ * Wiedergabe den Download ein; dann erst spielen, wenn er ganz da ist.
+ * Für Tests veränderbar.
+ */
+export const PARTIAL = { bytes: 256 * 1024, pollMs: 500, minRate: 48 * 1024 };
+
+/** Eine Messung der wachsenden Datei: wann, wie groß. */
+export type Sample = { at: number; size: number };
+
+/** Genug da, und der Download wächst schnell genug, dass die Wiedergabe ihn nicht einholt. */
+export function playableWhileLoading(first: Sample, now: Sample): boolean {
+  if (now.size < PARTIAL.bytes) return false;
+  const seconds = (now.at - first.at) / 1000;
+  // Schon bei der ersten Messung genug da: schneller geht es kaum.
+  if (seconds <= 0) return true;
+  return (now.size - first.size) / seconds >= PARTIAL.minRate;
+}
 
 /**
  * Wie es um den Download eines Titels steht, für den Leser, der die wachsende
@@ -578,6 +613,8 @@ async function pump(): Promise<void> {
       const next = nextToLoad();
       if (!next) break;
       const owner = next.playlistId ? list : null;
+      // Übersprungen oder verworfen, während er noch lädt: Download abbrechen, damit der nächste gleich drankommt.
+      const abort = new AbortController();
       try {
         mkdirSync(cacheDir(), { recursive: true });
         // Drei Minuten plus Zeit für lange Titel: Ein Stunden-Mix braucht länger.
@@ -587,22 +624,33 @@ async function pump(): Promise<void> {
         const filter = owner ? ['--match-filter', owner.team ? '!is_live' : `!is_live & duration <=? ${RULES.maxTrackMinutes * 60}`] : [];
         // Ohne .part-Datei: Sobald genug WebM da ist, kann der Song schon laufen.
         const growing = join(cacheDir(), `${next.id}.webm`);
+        let first: Sample | null = null;
         const watch = setInterval(() => {
-          if (next.status !== 'loading' || !stillWanted(next)) return;
+          if (!stillWanted(next)) {
+            abort.abort();
+            return;
+          }
+          if (next.status !== 'loading') return;
+          let sample: Sample;
           try {
-            if (statSync(growing).size < PARTIAL.bytes) return;
+            sample = { at: Date.now(), size: statSync(growing).size };
           } catch {
             return;
           }
+          first ??= sample;
+          if (!playableWhileLoading(first, sample)) return;
           next.file = growing;
           next.status = 'partial';
+          log.info('Queue: playing while downloading', {
+            title: next.title, kbPerSecond: Math.round((sample.size - first.size) / Math.max(sample.at - first.at, 1)),
+          });
           changed();
         }, PARTIAL.pollMs);
         let out: string;
         try {
           out = await run(['--no-playlist', ...filter, '-f', 'bestaudio/best', '--no-progress', '--quiet', '--no-part',
             '-o', join(cacheDir(), `${next.id}.%(ext)s`),
-            '--print', 'after_move:%(.{filepath,title,duration,thumbnail})j', '--', next.url], timeoutMs);
+            '--print', 'after_move:%(.{filepath,title,duration,thumbnail})j', '--', next.url], timeoutMs, abort.signal);
         } finally {
           clearInterval(watch);
         }
@@ -624,6 +672,11 @@ async function pump(): Promise<void> {
         }
         changed();
       } catch (error) {
+        if (abort.signal.aborted || !stillWanted(next)) {
+          removeDownload(next);
+          log.info('Queue: download dropped', { title: next.title });
+          continue;
+        }
         log.warn('Queue: could not load track', { title: next.title, error: String(error) });
         // Aus einer inzwischen ersetzten Playlist: nichts zu melden.
         if (next.playlistId) {

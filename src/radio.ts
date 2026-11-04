@@ -891,15 +891,33 @@ function leave(): void {
   if (current && current.state.status !== VoiceConnectionStatus.Destroyed) current.destroy();
 }
 
+/** 30 Sekunden ohne Ton (Pakete à 20 ms), bevor der Player aufgibt. */
+const STALL_FRAMES = 1500;
+
 function audioPlayer(): AudioPlayer {
   if (player) return player;
-  player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } });
+  // Kommt kein Ton nach, schickt der Player Stille. Von sich aus hört er schon
+  // nach 100 ms auf, und der Song gälte als zu Ende. Ein Song, der noch lädt,
+  // hängt aber mal kurz; ein Sender ohne Daten endet über ffmpeg (-rw_timeout).
+  player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause, maxMissedFrames: STALL_FRAMES } });
   player.on(AudioPlayerStatus.Idle, (oldState: AudioPlayerState) => {
     if (!playing || !('resource' in oldState) || oldState.resource !== resource) return;
     // Ein Song ist zu Ende: der nächste Wunsch, die Playlist, oder wieder das Radio.
     if (playing.startsWith('track:')) {
       const id = playing.slice('track:'.length);
+      const track = playingTrack();
+      const played = Math.round(trackPosition());
       stopStream();
+      // Lädt er noch, ist der Song nicht zu Ende, nur der Download zu langsam:
+      // solange das Radio, dann an derselben Stelle weiter (ohne die Stille).
+      if (track?.status === 'partial' && downloadState(track) === 'growing') {
+        const silent = 'missedFrames' in oldState ? oldState.missedFrames * 0.02 : 0;
+        track.resumeAt = Math.max(0, (track.resumeAt ?? 0) - silent);
+        log.warn('Radio: download fell behind, song continues once loaded', { title: track.title, at: Math.round(track.resumeAt) });
+        syncRadio();
+        return;
+      }
+      log.info('Radio: track ended', { title: track?.title, played, duration: track?.duration });
       if (head()?.id === id) finishHead();
       else if (playlistHead()?.id === id) finishPlaylistTrack();
       else syncRadio();
