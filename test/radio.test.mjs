@@ -1030,13 +1030,16 @@ test('YouTube will eine Anmeldung: derselbe Song kommt später noch mal, der lau
   enter(m);
   const retries = RULES.blockedRetrySeconds;
   RULES.blockedRetrySeconds = [0.01, 0.01];
-  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  // Bis der Zustand erreicht ist, höchstens zwei Sekunden: Die Versuche laufen über echte Timer.
+  const until = async (done) => {
+    for (const started = Date.now(); !done() && Date.now() - started < 2000;) await new Promise((resolve) => setTimeout(resolve, 5));
+  };
   try {
     // Einmal geblockt: Beim zweiten Versuch klappt es, ohne dass ein Song ausfällt.
     blocked.set('https://www.youtube.com/watch?v=vier', 1);
     const before = downloads.length;
     await radio.requestPlaylist(deferred(m), 'https://www.youtube.com/playlist?list=PLfocus');
-    await wait(60);
+    await until(() => downloads.slice(before).some((d) => d.url.endsWith('v=vier')));
     const first = queue.playlistHead();
     assert.equal(first.title, 'Kurzer Song');
     assert.equal(blocked.get('https://www.youtube.com/watch?v=vier'), 0, 'einmal geblockt');
@@ -1049,7 +1052,7 @@ test('YouTube will eine Anmeldung: derselbe Song kommt später noch mal, der lau
     const current = queue.playlistHead();
     assert.equal(current.title, 'Vierter Song');
     radio.pretendPlaying(current.id);
-    await wait(80);
+    await until(() => queue.playlist()?.endless === false && radio.radioSnapshot().playlist?.left === 0);
     assert.equal(queue.playlistHead(), current, 'der laufende Song bleibt');
     assert.equal(radio.nextTrack(), current);
     assert.equal(radio.radioSnapshot().playlist.left, 0, 'danach kommt nichts mehr');
