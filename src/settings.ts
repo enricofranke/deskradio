@@ -55,6 +55,12 @@ export const RULES = {
   /** YouTube-Mix: so viele Songs auf einmal, und nachladen, wenn nur noch so viele übrig sind. */
   mixBatch: 50,
   mixRefill: 5,
+  /**
+   * YouTube verlangt über manche Proxy-Adressen eine Anmeldung („not a bot“).
+   * Das liegt an der Adresse, nicht am Song: denselben Song nach diesen Pausen
+   * erneut versuchen, jedes Mal über eine andere Adresse.
+   */
+  blockedRetrySeconds: [15, 30, 60, 120],
   skipVoteSeconds: 30,
   /** Pause nach einer Abstimmung zum Überspringen (Song oder Playlist). */
   skipCooldownSeconds: 30,

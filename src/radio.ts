@@ -1029,6 +1029,8 @@ function trackPosition(): number {
 }
 
 function stopStream(): void {
+  // Lief der Sender eine Weile, gilt ein späterer Abbruch wieder als erster: kurze Pause, nicht die alte lange.
+  if (playing && !playing.startsWith('track:') && Date.now() - playingSince > 60_000) restartDelay = 5_000;
   if (restartTimer) clearTimeout(restartTimer);
   restartTimer = null;
   // Für ein Weiterspielen an derselben Stelle merken.

@@ -45,6 +45,9 @@ export type Track = {
   playlistId?: string;
   /** Stelle in der Playlist, ab 0. */
   entryIndex?: number;
+  /** Versuche, nachdem YouTube eine Anmeldung verlangt hat, und wann der nächste dran ist (ms). */
+  attempts?: number;
+  retryAt?: number;
 };
 export type TrackInfo = { title: string; duration: number; isLive: boolean; source: string; url: string; thumbnail: string | null };
 export type WishError = 'link' | 'full' | 'limit' | 'live' | 'long' | 'failed';
@@ -78,6 +81,8 @@ type Playlist = Omit<PlaylistView, 'position'> & {
   nextEntry: number;
   /** Downloads, die nacheinander gescheitert sind. */
   failures: number;
+  /** Lässt sich nichts mehr laden, endet die Playlist nach dem laufenden Song mit dieser Meldung. */
+  endEvent?: string;
   /** Schon in der Liste, damit ein nachgeladener Mix nichts doppelt bringt. */
   seen: Set<string>;
   extending: boolean;
@@ -458,7 +463,7 @@ export function finishPlaylistTrack(event?: string): Track | undefined {
   fillBuffer(p);
   if (p.buffer.length === 0) {
     list = null;
-    changed(event ?? t('event_playlist_done', { title: p.title }));
+    changed(event ?? p.endEvent ?? t('event_playlist_done', { title: p.title }));
     return done;
   }
   changed(event);
@@ -473,6 +478,26 @@ export function clearPlaylist(event?: string): PlaylistView | null {
   dropPlaylist();
   changed(event);
   return view;
+}
+
+/**
+ * Nichts mehr nachladen. Ein Song, der schon da ist (meist der laufende),
+ * spielt zu Ende; ein Fehler bei den nächsten Songs bricht ihn nicht ab.
+ */
+function endAfterCurrent(p: Playlist, event: string): void {
+  const current = p.buffer[0]?.file ? p.buffer[0] : undefined;
+  for (const track of p.buffer) if (track !== current) removeFile(track);
+  p.buffer = current ? [current] : [];
+  p.nextEntry = p.entries.length;
+  p.endless = false;
+  if (!current) {
+    list = null;
+    changed(event);
+    return;
+  }
+  p.total = (current.entryIndex ?? 0) + 1;
+  p.endEvent = event;
+  changed();
 }
 
 function dropPlaylist(): void {
@@ -595,9 +620,16 @@ export function followFile(path: string, state: () => 'growing' | 'done' | 'gone
   });
 }
 
-/** Erst die Wünsche, dann die Playlist. */
+/** Erst die Wünsche, dann die Playlist. Wer auf einen neuen Versuch wartet, kommt erst danach dran. */
 function nextToLoad(): Track | undefined {
-  return queue.find((track) => track.status === 'loading') ?? list?.buffer.find((track) => track.status === 'loading');
+  const now = Date.now();
+  const due = (track: Track) => track.status === 'loading' && (track.retryAt ?? 0) <= now;
+  return queue.find(due) ?? list?.buffer.find(due);
+}
+
+/** „Sign in to confirm you're not a bot“: YouTube misstraut der Proxy-Adresse, nicht dem Song. */
+export function blockedByYouTube(message: string): boolean {
+  return /confirm you.?re not a bot|sign in to confirm/i.test(message);
 }
 
 export function stillWanted(track: Track): boolean {
@@ -677,10 +709,22 @@ async function pump(): Promise<void> {
           log.info('Queue: download dropped', { title: next.title });
           continue;
         }
-        log.warn('Queue: could not load track', { title: next.title, error: String(error) });
+        const message = String(error);
+        const blocked = blockedByYouTube(message);
+        const tries = next.attempts ?? 0;
+        // Denselben Song später noch mal, über eine neue Adresse; der laufende Song spielt so lange weiter.
+        if (blocked && next.status === 'loading' && tries < RULES.blockedRetrySeconds.length) {
+          const seconds = RULES.blockedRetrySeconds[tries];
+          next.attempts = tries + 1;
+          next.retryAt = Date.now() + seconds * 1000;
+          log.warn('Queue: YouTube wants a sign-in, trying again', { title: next.title, attempt: next.attempts, seconds });
+          setTimeout(() => void pump(), seconds * 1000).unref();
+          continue;
+        }
+        log.warn('Queue: could not load track', { title: next.title, error: message });
         // Aus einer inzwischen ersetzten Playlist: nichts zu melden.
         if (next.playlistId) {
-          if (owner && owner === list) playlistTrackFailed(owner, next);
+          if (owner && owner === list) playlistTrackFailed(owner, next, blocked);
         } else {
           const index = queue.indexOf(next);
           if (index !== -1) queue.splice(index, 1);
@@ -695,17 +739,21 @@ async function pump(): Promise<void> {
 
 /**
  * Ein Song der Playlist lässt sich nicht laden: auslassen und den nächsten
- * holen. Scheitern mehrere hintereinander, stimmt etwas Grundsätzliches nicht
- * (etwa YouTube sperrt), dann endet die Playlist, statt sie durchzuprobieren.
+ * holen. Scheitern mehrere hintereinander, stimmt etwas Grundsätzliches nicht,
+ * dann endet die Playlist, statt sie durchzuprobieren. Blockt YouTube auch nach
+ * allen neuen Versuchen, liegt es nie am Song: dann gleich Schluss.
  */
-function playlistTrackFailed(p: Playlist, track: Track): void {
+function playlistTrackFailed(p: Playlist, track: Track, blocked = false): void {
   const index = p.buffer.indexOf(track);
   if (index === -1) return;
   p.buffer.splice(index, 1);
   p.failures++;
+  if (blocked) {
+    endAfterCurrent(p, t('event_playlist_blocked', { title: p.title }));
+    return;
+  }
   if (p.failures >= RULES.playlistMaxFailures) {
-    dropPlaylist();
-    changed(t('event_playlist_broken', { title: p.title }));
+    endAfterCurrent(p, t('event_playlist_broken', { title: p.title }));
     return;
   }
   fillBuffer(p);

@@ -101,6 +101,7 @@ const DE = {
   'event_playlist_vote_failed': '❌ Überspringen der Playlist **{title}** abgelehnt ({yes} Ja, {no} Nein)',
   'event_playlist_done': '📃 Playlist **{title}** ist durch, weiter mit dem Radio',
   'event_playlist_broken': '⚠️ Playlist **{title}** abgebrochen: mehrere Songs hintereinander ließen sich nicht laden',
+  'event_playlist_blocked': '⚠️ Playlist **{title}** beendet: YouTube lässt den Bot gerade keine Songs laden (Bot-Prüfung). Später einfach neu starten',
   'error': 'Da ist etwas schiefgelaufen. Versuch es gleich noch einmal.',
 } as const;
 
@@ -203,6 +204,7 @@ const EN: Record<TextKey, string> = {
   'event_playlist_vote_failed': '❌ Skipping the playlist **{title}** rejected ({yes} yes, {no} no)',
   'event_playlist_done': '📃 Playlist **{title}** has finished, back to the radio',
   'event_playlist_broken': '⚠️ Playlist **{title}** stopped: several songs in a row could not be loaded',
+  'event_playlist_blocked': '⚠️ Playlist **{title}** stopped: YouTube is not letting the bot load songs right now (bot check). Just start it again later',
   'error': 'Something went wrong. Please try again in a moment.',
 };
 

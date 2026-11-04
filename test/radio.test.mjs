@@ -61,6 +61,8 @@ const probes = [];
 /** Downloads, die erst halb geschrieben sind, bis ihr Promise sich erfüllt. */
 const slow = new Map();
 const failDownload = new Set();
+/** YouTube will eine Anmeldung: so oft noch für diese Adresse. */
+const blocked = new Map();
 /** Jeder Download mit seinen Argumenten, für die Playlist-Tests. */
 const downloads = [];
 /** Downloads, die abgebrochen wurden, weil niemand sie mehr braucht. */
@@ -83,6 +85,10 @@ queue.useRunner(async (args, _timeoutMs, signal) => {
   const info = catalog.get(url);
   if (!info) throw new Error('Video unavailable');
   if (failDownload.has(url)) throw new Error('HTTP Error 403: Forbidden');
+  if (blocked.get(url) > 0) {
+    blocked.set(url, blocked.get(url) - 1);
+    throw new Error('Sign in to confirm you’re not a bot. Use --cookies-from-browser or --cookies for the authentication.');
+  }
   downloads.push({ url, args });
   // --match-filter wie yt-dlp: ausgelassen heißt, es kommt nichts zurück.
   const filter = args.includes('--match-filter') ? args[args.indexOf('--match-filter') + 1] : '';
@@ -1013,6 +1019,49 @@ test('übersprungen, während er noch lädt: Download bricht ab, der nächste So
     Object.assign(queue.PARTIAL, { pollMs: 500 });
     queue.clearPlaylist();
     await settle();
+    empty();
+  }
+});
+
+test('YouTube will eine Anmeldung: derselbe Song kommt später noch mal, der laufende spielt immer zu Ende', async () => {
+  assert.equal(queue.blockedByYouTube('Sign in to confirm you’re not a bot. Use --cookies-from-browser'), true);
+  assert.equal(queue.blockedByYouTube('HTTP Error 403: Forbidden'), false);
+  const m = member();
+  enter(m);
+  const retries = RULES.blockedRetrySeconds;
+  RULES.blockedRetrySeconds = [0.01, 0.01];
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  try {
+    // Einmal geblockt: Beim zweiten Versuch klappt es, ohne dass ein Song ausfällt.
+    blocked.set('https://www.youtube.com/watch?v=vier', 1);
+    const before = downloads.length;
+    await radio.requestPlaylist(deferred(m), 'https://www.youtube.com/playlist?list=PLfocus');
+    await wait(60);
+    const first = queue.playlistHead();
+    assert.equal(first.title, 'Kurzer Song');
+    assert.equal(blocked.get('https://www.youtube.com/watch?v=vier'), 0, 'einmal geblockt');
+    assert.equal(downloads.slice(before).filter((d) => d.url.endsWith('v=vier')).length, 1, 'beim zweiten Versuch geladen');
+    assert(!text(await panelNow()).includes(t('event_wish_failed', { title: 'Vierter Song' })));
+
+    // YouTube blockt weiter: Der nächste Song lässt sich nicht laden, der laufende spielt trotzdem zu Ende.
+    blocked.set('https://www.youtube.com/watch?v=fuenf', 99);
+    queue.finishPlaylistTrack();
+    const current = queue.playlistHead();
+    assert.equal(current.title, 'Vierter Song');
+    radio.pretendPlaying(current.id);
+    await wait(80);
+    assert.equal(queue.playlistHead(), current, 'der laufende Song bleibt');
+    assert.equal(radio.nextTrack(), current);
+    assert.equal(radio.radioSnapshot().playlist.left, 0, 'danach kommt nichts mehr');
+    queue.finishPlaylistTrack();
+    assert.equal(queue.playlist(), null);
+    assert(text(await panelNow()).includes(t('event_playlist_blocked', { title: 'Focus Mix' })), 'erst jetzt die Meldung');
+  } finally {
+    RULES.blockedRetrySeconds = retries;
+    blocked.clear();
+    radio.pretendPlaying(null);
+    queue.clearPlaylist();
+    empty();
   }
 });
 
