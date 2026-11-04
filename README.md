@@ -95,7 +95,7 @@ Everything also works from the panel. German Discord clients see the German name
 | `/radio station` | `/radio sender` | everyone | Team switches instantly, everyone else starts a vote |
 | `/radio now` | `/radio jetzt` | everyone | Station, current song and listeners |
 | `/radio volume [percent]` | `/radio lautstärke` | everyone / team | Shows the volume; the team sets it (1–100 %) |
-| `/radio request link` | `/radio wunsch` | listeners, team | Queues a song from YouTube or SoundCloud (a playlist link starts the playlist) |
+| `/radio request link` | `/radio wunsch` | listeners, team | Queues a song from YouTube or SoundCloud (a playlist link starts the playlist); the team can play it right away |
 | `/radio playlist link [shuffle]` | `/radio playlist [zufällig]` | listeners, team | Plays a YouTube or SoundCloud playlist, optionally shuffled |
 | `/radio skip` | `/radio skip` | everyone | Skips the current request or playlist song: team and requester instantly, others by vote |
 | `/radio playlist-skip` | `/radio playlist-überspringen` | everyone | Skips the whole playlist: team and whoever started it instantly, others by vote |
@@ -120,12 +120,13 @@ Skip votes (for a song or a whole playlist) work the same way with 30 seconds. A
 - yt-dlp reads title and length and downloads the audio ahead of time, so playback doesn't stutter. Each file is deleted right after it has played.
 - While requests are queued the radio pauses, then the last station comes back.
 - Limits: up to 10 minutes per track, no livestreams, 2 requests per person, 20 in total. The team has no length or per-person limit.
+- If a song is already playing or requests are waiting, the bot asks the team: **▶️ Play now** or **➕ Add to queue**. "Play now" puts the song at the front; once it has loaded it interrupts the current song, which then continues where it stopped.
 
 ## Playlists
 
 - Paste a playlist link (`youtube.com/playlist?list=…`, a SoundCloud set) into **📃 Playlist** in the panel, `/radio playlist` or the request form. A link to a video inside a playlist (`watch?v=…&list=…`) starts the playlist at that video when used with `/radio playlist`; in the request form it stays a single song.
 - **YouTube mixes** ("Start radio", `watch?v=…&list=RD…&start_radio=1`) work too, also in the request form. A mix never runs out: before it ends, the bot fetches a new mix from its last song, without repeats. It plays until someone skips it.
-- Requests come first: they play between playlist songs, never in the middle of one. When the playlist is done, the radio comes back.
+- Requests come first: they play between playlist songs, never in the middle of one (unless the team plays a song right away). When the playlist is done, the radio comes back.
 - YouTube songs start while they are still downloading, so the first song usually plays 20–30 seconds after the link, depending on the proxy. That only happens when the download runs clearly faster than playback; on a slow proxy exit the song waits until it is complete. If a download stalls anyway, the song pauses silently for up to 30 seconds, then the radio fills in and the song continues at the same spot once it is loaded. Skipping a song that is still downloading cancels the download, so the next one loads right away.
 - When YouTube answers with its bot check ("Sign in to confirm you're not a bot"), that is the proxy address, not the song: the bot tries the same song again after 15, 30, 60 and 120 seconds, each time through a new address. Only if it is still blocked after that does the playlist end, and even then the song that is playing finishes first.
 - Only the current and the next song are downloaded, not the whole list. Private, deleted and live videos are left out.

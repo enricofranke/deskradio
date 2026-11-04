@@ -48,10 +48,13 @@ export type Track = {
   /** Versuche, nachdem YouTube eine Anmeldung verlangt hat, und wann der nächste dran ist (ms). */
   attempts?: number;
   retryAt?: number;
+  /** Vom Team vorgezogen: unterbricht den laufenden Song, sobald er spielbar ist. */
+  jump?: boolean;
 };
 export type TrackInfo = { title: string; duration: number; isLive: boolean; source: string; url: string; thumbnail: string | null };
 export type WishError = 'link' | 'full' | 'limit' | 'live' | 'long' | 'failed';
 export type WishResult = { track: Track; position: number } | { error: WishError; detail?: string };
+export type WishCheck = { info: TrackInfo } | { error: WishError; detail?: string };
 
 /** Ein Eintrag aus der Playlist, noch nicht heruntergeladen. SoundCloud nennt den Titel erst beim Download. */
 export type PlaylistEntry = { id: string | null; url: string; title: string | null; duration: number; thumbnail: string | null };
@@ -283,13 +286,8 @@ function roomFor(requesterId: string, team: boolean): WishError | null {
   return null;
 }
 
-/**
- * `announce` liefert den Hinweis fürs Panel. Er wird im selben Moment gesetzt,
- * in dem der Titel eingereiht wird: Schlägt der Download danach schnell fehl,
- * überschreibt der Wunsch-Hinweis die Fehlermeldung nicht mehr.
- */
-export async function addWish(link: string, requesterId: string, team: boolean,
-  announce?: (track: Track) => string): Promise<WishResult> {
+/** Link und Grenzen prüfen, Titel und Länge abrufen. Eingereiht wird erst mit queueWish. */
+export async function checkWish(link: string, requesterId: string, team: boolean): Promise<WishCheck> {
   const url = supportedLink(link);
   if (!url) return { error: 'link' };
   const early = roomFor(requesterId, team);
@@ -305,23 +303,60 @@ export async function addWish(link: string, requesterId: string, team: boolean,
   if (info.isLive || info.duration <= 0) return { error: 'live' };
   // Das Team darf auch lange Mixe wünschen.
   if (!team && info.duration > RULES.maxTrackMinutes * 60) return { error: 'long' };
-  // Während des Abrufs kann die Schlange voll geworden sein.
+  return { info };
+}
+
+/**
+ * Reiht einen geprüften Titel ein. `now` (nur fürs Team): ganz nach vorn, und
+ * sobald er spielbar ist, unterbricht er den laufenden Song; der geht danach
+ * an derselben Stelle weiter.
+ *
+ * `announce` liefert den Hinweis fürs Panel. Er wird im selben Moment gesetzt,
+ * in dem der Titel eingereiht wird: Schlägt der Download danach schnell fehl,
+ * überschreibt der Wunsch-Hinweis die Fehlermeldung nicht mehr.
+ */
+export function queueWish(info: TrackInfo, requesterId: string, team: boolean,
+  { now = false, announce }: { now?: boolean; announce?: (track: Track) => string } = {}): WishResult {
+  // Seit der Prüfung kann die Schlange voll geworden sein.
   const late = roomFor(requesterId, team);
   if (late) return { error: late };
 
   const track: Track = {
     id: `w${nextId++}`, source: info.source, title: info.title, duration: info.duration,
     url: info.url, requesterId, thumbnail: info.thumbnail, file: null, status: 'loading',
+    ...(now ? { jump: true } : {}),
   };
-  queue.push(track);
+  if (now) queue.unshift(track);
+  else queue.push(track);
   changed(announce?.(track));
   void pump();
   return { track, position: queue.indexOf(track) + 1 };
 }
 
+export async function addWish(link: string, requesterId: string, team: boolean,
+  announce?: (track: Track) => string): Promise<WishResult> {
+  const checked = await checkWish(link, requesterId, team);
+  if ('error' in checked) return checked;
+  return queueWish(checked.info, requesterId, team, { announce });
+}
+
 /** Der erste Titel ist gelaufen oder übersprungen: weg damit samt Datei. */
 export function finishHead(event?: string): Track | undefined {
   const done = queue.shift();
+  removeFile(done);
+  changed(event);
+  void pump();
+  return done;
+}
+
+/**
+ * Ein Wunsch ist gelaufen oder übersprungen. Meist der erste; ist ein Wunsch
+ * vorgezogen worden, kann es auch der dahinter sein, der unterbrochen wurde.
+ */
+export function finishWish(id: string, event?: string): Track | undefined {
+  const index = queue.findIndex((track) => track.id === id);
+  if (index === -1) return undefined;
+  const [done] = queue.splice(index, 1);
   removeFile(done);
   changed(event);
   void pump();

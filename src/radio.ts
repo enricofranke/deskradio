@@ -16,7 +16,10 @@ import {
   type VoiceConnectionState,
 } from '@discordjs/voice';
 import {
+  ActionRowBuilder,
   ActivityType,
+  ButtonBuilder,
+  ButtonStyle,
   ChannelType,
   MessageFlags,
   PermissionFlagsBits,
@@ -37,11 +40,11 @@ import { RULES, STATIONS, getState, target, updateState, type Station } from './
 import { t } from './texts.js';
 import {
   addPlaylist,
-  addWish,
+  checkWish,
   clearPlaylist,
   clearQueue,
   downloadState,
-  finishHead,
+  finishWish,
   followFile,
   finishPlaylistTrack,
   head,
@@ -49,11 +52,14 @@ import {
   onQueueChange,
   playlist,
   playlistHead,
+  queueWish,
   resetCache,
   supportedLink,
   tracks,
   type PlaylistView,
   type Track,
+  type TrackInfo,
+  type WishError,
 } from './queue.js';
 
 /**
@@ -62,7 +68,9 @@ import {
  * Discord annimmt; @discordjs/voice taktet die Pakete und verschlüsselt sie.
  *
  * Vorrang hat ein Wunsch, dann eine Playlist, dann das Radio. Ein laufender
- * Song wird nicht für einen anderen unterbrochen, nur das Radio.
+ * Song wird nicht für einen anderen unterbrochen, nur das Radio. Ausnahme:
+ * Das Team kann einen Wunsch „sofort“ spielen; der unterbricht, und der
+ * unterbrochene Song geht danach an derselben Stelle weiter.
  *
  * Gestreamt wird nur, solange jemand mit eingeschaltetem Ton zuhört. Sender,
  * Lautstärke und an/aus liegen im Zustand (settings.ts) und überstehen so
@@ -184,20 +192,30 @@ export function pretendPlaying(trackId: string | null): void {
   playing = trackId ? `track:${trackId}` : null;
 }
 
-/** Erster Wunsch und aktueller Playlist-Song: nur diese beiden können laufen. */
-function candidates(): Track[] {
-  return [head(), playlistHead()].filter((track) => track !== undefined);
+/** Ein Wunsch (an beliebiger Stelle) oder der aktuelle Playlist-Song. */
+function findTrack(id: string | null): Track | undefined {
+  return [...tracks(), playlistHead()].find((track) => track !== undefined && track.id === id);
 }
 
 /** Der Song, der gerade spielt – nicht bloß der erste in der Schlange. */
 function playingTrack(): Track | null {
   if (!playing?.startsWith('track:')) return null;
-  return candidates().find((track) => playing === `track:${track.id}`) ?? null;
+  return findTrack(playing.slice('track:'.length)) ?? null;
 }
 
 /**
- * Was jetzt laufen soll. Ein Song, der schon läuft, spielt zu Ende; einer,
- * der unterbrochen wurde, geht zuerst weiter. Sonst der erste Wunsch vor der
+ * Nur diese können laufen: der erste Wunsch, der laufende Song und der
+ * aktuelle Playlist-Song. Nach einem vorgezogenen Wunsch ist der laufende
+ * nicht mehr der erste in der Schlange.
+ */
+function candidates(): Track[] {
+  return [...new Set([head(), playingTrack() ?? undefined, playlistHead()])].filter((track) => track !== undefined);
+}
+
+/**
+ * Was jetzt laufen soll. Ein vorgezogener Wunsch unterbricht, sobald er
+ * spielbar ist. Sonst spielt ein Song, der schon läuft, zu Ende; einer, der
+ * unterbrochen wurde, geht zuerst weiter. Sonst der erste Wunsch vor der
  * Playlist. Lädt beides noch, läuft solange das Radio.
  *
  * Ein Song, der noch lädt, kann nur von vorn laufen: Mittendrin weiter geht
@@ -206,7 +224,8 @@ function playingTrack(): Track | null {
 export function nextTrack(): Track | null {
   const ready = candidates().filter((track) => track.file &&
     (track.status === 'ready' || (track.status === 'partial' && !(track.resumeAt ?? 0))));
-  return ready.find((track) => playing === `track:${track.id}`)
+  return ready.find((track) => track.jump)
+    ?? ready.find((track) => playing === `track:${track.id}`)
     ?? ready.find((track) => (track.resumeAt ?? 0) > 0)
     ?? ready[0] ?? null;
 }
@@ -215,7 +234,7 @@ export function nextTrack(): Track | null {
 onQueueChange((text) => {
   if (text) event(text);
   // Der Titel oder die Playlist, über die abgestimmt wurde, ist schon vorbei.
-  if (vote?.kind === 'skip' && !candidates().some((track) => track.id === vote?.targetId)) conclude(vote, 'obsolete');
+  if (vote?.kind === 'skip' && !findTrack(vote.targetId)) conclude(vote, 'obsolete');
   if (vote?.kind === 'playlist' && playlist()?.id !== vote.targetId) conclude(vote, 'obsolete');
   syncRadio();
   changed();
@@ -431,7 +450,11 @@ export async function requestStation(interaction: ChatInputCommandInteraction | 
 
 // ============================================================== Wünsche
 
-/** Wünschen darf, wer zuhört; das Team auch von außerhalb. Ein Playlist-Link startet die Playlist. */
+/**
+ * Wünschen darf, wer zuhört; das Team auch von außerhalb. Ein Playlist-Link
+ * startet die Playlist. Läuft schon ein Song oder warten Wünsche, fragt der
+ * Bot das Team: sofort spielen oder hinten anstellen?
+ */
 export async function requestWish(interaction: ChatInputCommandInteraction | ModalSubmitInteraction, link: string): Promise<void> {
   const url = supportedLink(link);
   if (url && isPlaylistLink(url)) {
@@ -455,16 +478,70 @@ export async function requestWish(interaction: ChatInputCommandInteraction | Mod
   }
   // yt-dlp braucht ein paar Sekunden für Titel und Länge.
   await interaction.deferReply(EPHEMERAL);
-  const result = await addWish(link, member.id, team, (track) => t('event_wish', { user: `<@${member.id}>`, title: track.title }));
-  if ('error' in result) {
-    await interaction.editReply({ content: t(`wish_${result.error}`, {
-      max: result.error === 'full' ? RULES.queueMax : RULES.wishesPerPerson,
-      minutes: RULES.maxTrackMinutes, detail: result.detail ?? '',
-    }) });
+  const checked = await checkWish(link, member.id, team);
+  if ('error' in checked) {
+    await interaction.editReply({ content: wishError(checked) });
     return;
   }
-  log.info('Radio: request queued', { title: result.track.title, source: result.track.source, by: member.id });
-  await interaction.editReply({ content: t('wish_added', { title: result.track.title, position: result.position }) });
+  if (team && (playingTrack() || tracks().length > 0)) {
+    await interaction.editReply(wishChoice(checked.info, member.id));
+    return;
+  }
+  await interaction.editReply({ content: placeWish(checked.info, member, team, false) });
+}
+
+function wishError({ error, detail }: { error: WishError; detail?: string }): string {
+  return t(`wish_${error}`, {
+    max: error === 'full' ? RULES.queueMax : RULES.wishesPerPerson, minutes: RULES.maxTrackMinutes, detail: detail ?? '',
+  });
+}
+
+/** Einreihen, ins Log und ins Panel; zurück kommt die Antwort für die Person, die gewünscht hat. */
+function placeWish(info: TrackInfo, member: GuildMember, team: boolean, now: boolean): string {
+  const result = queueWish(info, member.id, team, {
+    now,
+    announce: (track) => t(now ? 'event_wish_now' : 'event_wish', { user: `<@${member.id}>`, title: track.title }),
+  });
+  if ('error' in result) return wishError(result);
+  log.info(now ? 'Radio: request plays now' : 'Radio: request queued', { title: result.track.title, source: result.track.source, by: member.id });
+  return now ? t('wish_now', { title: result.track.title }) : t('wish_added', { title: result.track.title, position: result.position });
+}
+
+/** Wünsche des Teams, die auf „sofort“ oder „Warteschlange“ warten. Nur im Speicher; ein Neustart vergisst sie. */
+const pendingWishes = new Map<string, { info: TrackInfo; userId: string; expires: number }>();
+const CHOICE_MS = 10 * 60_000;
+let pendingSeq = 0;
+
+function wishChoice(info: TrackInfo, userId: string) {
+  const now = Date.now();
+  for (const [key, pending] of pendingWishes) if (pending.expires < now) pendingWishes.delete(key);
+  const id = `${now.toString(36)}${(++pendingSeq).toString(36)}`;
+  pendingWishes.set(id, { info, userId, expires: now + CHOICE_MS });
+  const current = playingTrack();
+  const question = t('wish_choose', { title: info.title, position: tracks().length + 1 });
+  return {
+    content: current ? `${question}\n${t('wish_choose_note', { title: current.title })}` : question,
+    components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId(`radio:wish-now:${id}`).setLabel(t('wish_now_button')).setEmoji('▶️').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(`radio:wish-queue:${id}`).setLabel(t('wish_queue_button')).setEmoji('➕').setStyle(ButtonStyle.Secondary),
+    )],
+  };
+}
+
+/** Die Antwort des Teams auf „sofort oder Warteschlange?“. Die Frage wird durch das Ergebnis ersetzt. */
+export async function handleWishChoice(interaction: ButtonInteraction, now: boolean, id: string): Promise<void> {
+  const pending = pendingWishes.get(id);
+  if (!pending || pending.expires < Date.now() || pending.userId !== interaction.user.id) {
+    await interaction.update({ content: t('wish_choice_over'), components: [] });
+    return;
+  }
+  pendingWishes.delete(id);
+  if (!getState().enabled || !radioChannel()) {
+    await interaction.update({ content: t('off'), components: [] });
+    return;
+  }
+  const member = interaction.member as GuildMember;
+  await interaction.update({ content: placeWish(pending.info, member, isTeam(member), now), components: [] });
 }
 
 // ============================================================== Playlist
@@ -600,9 +677,10 @@ export async function clearWishes(interaction: ChatInputCommandInteraction): Pro
 
 /** Nur, wenn der Titel noch dran ist. Die neue Wiedergabe startet über den Hinweis der Warteschlange. */
 function skipTrack(id: string, text: string): void {
-  if (head()?.id === id) {
-    log.info('Radio: request skipped', { title: head()?.title });
-    finishHead(text);
+  const wish = tracks().find((track) => track.id === id);
+  if (wish) {
+    log.info('Radio: request skipped', { title: wish.title });
+    finishWish(id, text);
   } else if (playlistHead()?.id === id) {
     log.info('Radio: playlist song skipped', { title: playlistHead()?.title });
     finishPlaylistTrack(text);
@@ -918,7 +996,7 @@ function audioPlayer(): AudioPlayer {
         return;
       }
       log.info('Radio: track ended', { title: track?.title, played, duration: track?.duration });
-      if (head()?.id === id) finishHead();
+      if (tracks().some((wish) => wish.id === id)) finishWish(id);
       else if (playlistHead()?.id === id) finishPlaylistTrack();
       else syncRadio();
       return;

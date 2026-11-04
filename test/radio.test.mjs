@@ -627,6 +627,90 @@ test('das Team darf auch lange Mixe wünschen, Livestreams aber nicht', async ()
   queue.clearQueue();
 });
 
+test('Team: sofort abspielen oder in die Warteschlange, der unterbrochene Song geht danach weiter', async () => {
+  const [listener, admin] = [member(), member({ staff: true })];
+  enter(listener);
+  /** Klickt in der Antwort auf „Sofort“ oder „Warteschlange“ und liefert, was dann dort steht. */
+  const choose = async (interaction, now) => {
+    const [first, second] = interaction.replies.at(-1).components[0].components.map((button) => button.data.custom_id);
+    const [, , id] = (now ? first : second).split(':');
+    const click = { member: admin, user: { id: admin.id }, replies: [], async update(payload) { click.replies.push(payload); } };
+    await radio.handleWishChoice(click, now, id);
+    return click.replies.at(-1);
+  };
+  const releases = [];
+  const hold = (url) => slow.set(url, new Promise((resolve) => { releases.push(resolve); }));
+  try {
+    // Ohne laufenden Song und ohne Wünsche fragt der Bot nicht: Der Wunsch läuft ohnehin gleich.
+    const direct = deferred(admin);
+    await radio.requestWish(direct, 'https://www.youtube.com/watch?v=kurz');
+    assert.equal(lastReply(direct), t('wish_added', { title: 'Kurzer Song', position: 1 }));
+    assert.equal(direct.replies.at(-1).components, undefined);
+    await settle();
+    const current = queue.head();
+    radio.pretendPlaying(current.id);
+
+    // Läuft ein Song, fragt der Bot das Team und reiht erst nach der Wahl ein.
+    hold('https://www.youtube.com/watch?v=vier');
+    const ask = deferred(admin);
+    await radio.requestWish(ask, 'https://www.youtube.com/watch?v=vier');
+    assert.equal(lastReply(ask), `${t('wish_choose', { title: 'Vierter Song', position: 2 })}\n${t('wish_choose_note', { title: 'Kurzer Song' })}`);
+    assert.deepEqual(ask.replies.at(-1).components[0].components.map((button) => button.data.label), [t('wish_now_button'), t('wish_queue_button')]);
+    assert.equal(queue.tracks().length, 1);
+
+    const chosen = await choose(ask, true);
+    assert.equal(chosen.content, t('wish_now', { title: 'Vierter Song' }));
+    assert.deepEqual(chosen.components, [], 'die Buttons verschwinden');
+    const jump = queue.head();
+    assert.equal(jump.title, 'Vierter Song', 'ganz vorn');
+    assert.equal(queue.tracks()[1], current);
+    assert.equal(radio.nextTrack(), current, 'solange der neue lädt, läuft der alte weiter');
+    assert(text(await panelNow()).includes(t('event_wish_now', { user: `<@${admin.id}>`, title: 'Vierter Song' })));
+    assert.equal((await choose(ask, false)).content, t('wish_choice_over'), 'ein zweiter Klick tut nichts mehr');
+    assert.equal(queue.tracks().length, 2);
+
+    releases.shift()();
+    await settle();
+    assert.equal(radio.nextTrack(), jump, 'geladen: der vorgezogene unterbricht');
+    // Beim Umschalten merkt sich der Player die Stelle des unterbrochenen Songs.
+    current.resumeAt = 42;
+    radio.pretendPlaying(jump.id);
+    assert.equal(radio.nextTrack(), jump);
+
+    // Hinten anstellen.
+    const later = deferred(admin);
+    await radio.requestWish(later, 'https://youtu.be/drei');
+    assert.equal((await choose(later, false)).content, t('wish_added', { title: 'Dritter Song', position: 3 }));
+    assert.deepEqual(queue.tracks().map((track) => track.title), ['Vierter Song', 'Kurzer Song', 'Dritter Song']);
+    await settle();
+
+    // Der vorgezogene ist durch: Der unterbrochene geht an seiner Stelle weiter, nicht der Wunsch dahinter.
+    await radio.requestSkip(command(admin));
+    assert.equal(queue.head(), current);
+    radio.pretendPlaying(null);
+    assert.equal(radio.nextTrack(), current);
+    assert.equal(current.resumeAt, 42);
+
+    // Endet der unterbrochene, während der vorgezogene noch lädt, fliegt er aus der Mitte der Schlange.
+    radio.pretendPlaying(current.id);
+    hold('https://www.youtube.com/watch?v=fuenf');
+    const again = deferred(admin);
+    await radio.requestWish(again, 'https://www.youtube.com/watch?v=fuenf');
+    await choose(again, true);
+    assert.equal(radio.radioSnapshot().track.id, current.id, 'das Panel zeigt weiter den laufenden Song');
+    await radio.requestSkip(command(admin));
+    assert.deepEqual(queue.tracks().map((track) => track.title), ['Fünfter Song', 'Dritter Song']);
+    assert.equal(existsSync(current.file), false);
+  } finally {
+    for (const release of releases) release();
+    slow.clear();
+    radio.pretendPlaying(null);
+    queue.clearQueue();
+    await settle();
+    empty();
+  }
+});
+
 test('ein Titel, der sich nicht laden lässt, fliegt raus und steht im Panel', async () => {
   const m = member();
   enter(m);

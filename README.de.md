@@ -95,7 +95,7 @@ Alles geht auch über das Panel. Discord-Clients auf Englisch zeigen die englisc
 | `/radio sender` | `/radio station` | alle | Das Team wechselt sofort, alle anderen starten eine Abstimmung |
 | `/radio jetzt` | `/radio now` | alle | Sender, laufender Song und Zuhörende |
 | `/radio lautstärke [prozent]` | `/radio volume` | alle / Team | Zeigt die Lautstärke; das Team stellt sie ein (1–100 %) |
-| `/radio wunsch link` | `/radio request` | Zuhörende, Team | Wünscht einen Song von YouTube oder SoundCloud (ein Playlist-Link startet die Playlist) |
+| `/radio wunsch link` | `/radio request` | Zuhörende, Team | Wünscht einen Song von YouTube oder SoundCloud (ein Playlist-Link startet die Playlist); das Team kann ihn sofort spielen |
 | `/radio playlist link [zufällig]` | `/radio playlist [shuffle]` | Zuhörende, Team | Spielt eine YouTube- oder SoundCloud-Playlist, auf Wunsch gemischt |
 | `/radio skip` | `/radio skip` | alle | Überspringt den laufenden Wunsch oder Playlist-Song: Team und Wünschende sofort, sonst per Abstimmung |
 | `/radio playlist-überspringen` | `/radio playlist-skip` | alle | Überspringt die ganze Playlist: Team und wer sie gestartet hat sofort, sonst per Abstimmung |
@@ -120,12 +120,13 @@ Alles geht auch über das Panel. Discord-Clients auf Englisch zeigen die englisc
 - yt-dlp liest Titel und Länge und lädt die Tonspur vorab herunter, damit nichts hakt. Jede Datei wird gelöscht, sobald ihr Titel gelaufen ist.
 - Solange Wünsche in der Schlange sind, pausiert das Radio, danach läuft wieder der letzte Sender.
 - Grenzen: höchstens 10 Minuten pro Titel, keine Livestreams, 2 Wünsche pro Person, 20 insgesamt. Das Team hat keine Längen- und keine Pro-Kopf-Grenze.
+- Läuft schon ein Song oder warten Wünsche, fragt der Bot das Team: **▶️ Sofort abspielen** oder **➕ In die Warteschlange**. „Sofort“ stellt den Song ganz nach vorn; sobald er geladen ist, unterbricht er den laufenden Song, und der geht danach an derselben Stelle weiter.
 
 ## Playlists
 
 - Den Playlist-Link (`youtube.com/playlist?list=…`, ein SoundCloud-Set) in **📃 Playlist** im Panel, in `/radio playlist` oder ins Wunsch-Formular einfügen. Ein Link zu einem Video in einer Playlist (`watch?v=…&list=…`) startet mit `/radio playlist` die Playlist bei diesem Video; im Wunsch-Formular bleibt er ein einzelner Song.
 - **YouTube-Mixe** („Radio starten“, `watch?v=…&list=RD…&start_radio=1`) gehen auch, sogar im Wunsch-Formular. Ein Mix geht nie aus: Bevor er endet, holt der Bot einen neuen Mix ab dem letzten Song, ohne Wiederholungen. Er läuft, bis ihn jemand überspringt.
-- Wünsche gehen vor: Sie laufen zwischen zwei Playlist-Songs, nie mitten in einem. Ist die Playlist durch, kommt wieder das Radio.
+- Wünsche gehen vor: Sie laufen zwischen zwei Playlist-Songs, nie mitten in einem (außer das Team spielt einen Song sofort). Ist die Playlist durch, kommt wieder das Radio.
 - YouTube-Songs laufen schon, während sie noch laden; der erste Song spielt meist 20–30 Sekunden nach dem Link, je nach Proxy. Das gilt nur, wenn der Download deutlich schneller läuft als die Wiedergabe; über einen langsamen Proxy-Ausgang wartet der Song, bis er komplett ist. Hängt ein Download trotzdem, ist es bis zu 30 Sekunden still, dann springt das Radio ein, und der Song geht an derselben Stelle weiter, sobald er geladen ist. Wer einen Song überspringt, der noch lädt, bricht den Download ab, damit der nächste sofort lädt.
 - Antwortet YouTube mit der Bot-Prüfung („Sign in to confirm you're not a bot“), liegt das an der Proxy-Adresse, nicht am Song: Der Bot versucht denselben Song nach 15, 30, 60 und 120 Sekunden erneut, jedes Mal über eine neue Adresse. Erst wenn es dann noch hakt, endet die Playlist, und auch dann spielt der laufende Song zu Ende.
 - Geladen werden nur der laufende und der nächste Song, nicht die ganze Liste. Private, gelöschte und Live-Videos fallen raus.

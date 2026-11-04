@@ -11,6 +11,7 @@ import {
   handleRadioChannelUpdate,
   handleRadioCommand,
   handleRadioVoiceState,
+  handleWishChoice,
   radioAutocomplete,
   requestPlaylist,
   requestPlaylistSkip,
@@ -95,7 +96,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
     else if (interaction.isButton() && interaction.customId === 'radio:playlist') await interaction.showModal(playlistModal());
     else if (interaction.isButton() && interaction.customId === 'radio:skip') await requestSkip(interaction);
     else if (interaction.isButton() && interaction.customId === 'radio:playlist-skip') await requestPlaylistSkip(interaction);
-    else if (interaction.isButton() && interaction.customId.startsWith('radio:')) {
+    else if (interaction.isButton() && interaction.customId.startsWith('radio:wish-')) {
+      // „Sofort“ oder „Warteschlange“ auf die Frage nach einem Team-Wunsch.
+      const [, choice, id] = interaction.customId.split(':');
+      await handleWishChoice(interaction, choice === 'wish-now', id);
+    } else if (interaction.isButton() && interaction.customId.startsWith('radio:')) {
       const [, action, id] = interaction.customId.split(':');
       await handleRadioButton(interaction, action, id);
     }
